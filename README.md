@@ -10,6 +10,8 @@ It is a thin layer over the CXCaller REST API and authenticates with an **API ke
 AI agent ──MCP──▶ cxcaller-mcp ──HTTPS + API key──▶ CXCaller API ──▶ voice agents ──▶ phone network
 ```
 
+**New here? Start with the [usage guide](docs/usage-guide.md)**: connecting, recipes (one call, campaigns, structured answers), writing good instructions, limits and troubleshooting. Every tool and parameter is in the [tool reference](docs/tool-reference.md) (generated from the code).
+
 ## Get an API key
 
 Keys belong to one organization and are created by an owner or admin of it (the key is shown **once**):
@@ -149,6 +151,7 @@ Consider giving each agent its own key so it can be revoked on its own, and runn
 ```bash
 pnpm install
 pnpm test            # unit tests: fake API, MCP client over in-memory + real HTTP
+pnpm docs:tools      # regenerate docs/tool-reference.md (a test fails if it is stale)
 pnpm typecheck && pnpm build
 pnpm inspect         # open it in the MCP Inspector
 

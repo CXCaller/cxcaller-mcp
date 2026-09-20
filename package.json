@@ -23,7 +23,8 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "test:e2e": "vitest run --config vitest.e2e.config.ts",
-    "inspect": "pnpm build && npx @modelcontextprotocol/inspector node dist/cli.js"
+    "inspect": "pnpm build && npx @modelcontextprotocol/inspector node dist/cli.js",
+    "docs:tools": "tsx scripts/generate-tool-reference.ts"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.30.0",
