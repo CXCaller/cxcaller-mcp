@@ -45,6 +45,8 @@ const HINTS: Record<string, string> = {
     'Use caller_id.source "shared_pool" with no number, or "dedicated" with a phone_number_id this organization has claimed.',
   'error.campaign_recipients_source_required': 'Provide at least one of group_ids / contact_ids.',
   'error.campaign_outcome_field_key_duplicate': 'Outcome field keys must be unique.',
+  'error.campaign_recipient_not_retryable':
+    'Only recipients that are no_answer, failed or exhausted can be retried.',
   'error.contact_phone_already_exists':
     'A contact with this phone number already exists. Find it with list_contacts instead of creating it again.',
   'error.api_key_not_permitted':
