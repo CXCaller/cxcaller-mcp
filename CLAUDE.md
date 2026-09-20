@@ -24,3 +24,10 @@ pnpm test:e2e     # needs CXCALLER_E2E_URL/EMAIL/PASSWORD and a running cxcaller
 - Auth is an API key (`Authorization: Bearer cxk_…` or `X-API-Key`), bound to one organization; `GET /api-key/whoami` yields the org id every path needs.
 - The API has no single-call endpoint: `make_call` composes create → configure → import → launch on a one-recipient campaign. The dispatcher ticks every 20 s.
 - Campaign config is only editable in `draft`/`scheduled`. `PATCH` replaces `objectiveConfig` wholesale, so `update_campaign` merges onto the existing value first.
+
+## Hosted mode (mcp.cxcaller.com)
+
+- `src/http.ts` serves many tenants from one process. It has **no server-side key**, and must never gain one: a fallback would let anonymous callers act as a tenant. Never log keys, tool arguments, or bodies.
+- Limits are per **organization** (not per key) and per pod. Auth happens before the body is read.
+- Cloudflare drops a proxied request at 100 s: keep `CXCALLER_MCP_MAX_WAIT_SECONDS` below that, and `terminationGracePeriodSeconds` in the chart >= `preStopSeconds` + `CXCALLER_MCP_SHUTDOWN_GRACE_MS`.
+- Deployment lives in `cxcaller-infra` (`charts/cxcaller-mcp`, `argocd/apps/cxcaller-mcp.yaml`, Cloudflare tunnel + DNS in `terraform/`). CI bumps the image tag in that repo on merge to `main`.

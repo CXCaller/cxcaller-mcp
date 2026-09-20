@@ -4,6 +4,7 @@
   "description": "MCP server that lets AI agents place calls and run campaigns on the CXCaller platform",
   "license": "MIT",
   "type": "module",
+  "packageManager": "pnpm@12.4.2",
   "engines": {
     "node": ">=20"
   },

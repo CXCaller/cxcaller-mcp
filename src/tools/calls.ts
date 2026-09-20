@@ -7,7 +7,6 @@ import { callerIdSchema, outcomeFieldsSchema, pagingShape, phoneSchema, uuidSche
 
 const FINISHED = new Set(['completed', 'cancelled', 'failed']);
 const POLL_INTERVAL_MS = 3000;
-const MAX_WAIT_SECONDS = 110;
 
 interface Page<T> {
   data: T[];
@@ -61,7 +60,8 @@ async function waitUntilFinished(client: CxCallerClient, campaignId: string, sec
 const idShape = { campaign_id: uuidSchema.describe('Campaign id (for make_call, the campaign_id it returned).') };
 
 export function callTools(ctx: ToolContext): AnyToolSpec[] {
-  const { client } = ctx;
+  const { client, config } = ctx;
+  const maxWait = config.maxWaitSeconds;
   const { shared_variables: _sharedVariables, instructions: _instructions, ...agentOptions } = agentShape;
 
   return [
@@ -74,7 +74,7 @@ export function callTools(ctx: ToolContext): AnyToolSpec[] {
       description:
         'PLACES A REAL PHONE CALL to one person, made by an AI voice agent following your `instructions`. Only call this when the user has asked you to call this number, and never to numbers they did not give you. ' +
         'Dialing starts within about 20 seconds (the platform dispatches on a 20 s cycle) and the call is made once unless max_attempts says otherwise. ' +
-        'Internally this creates and launches a one-recipient campaign, so the call also appears in the dashboard. It returns immediately with a campaign_id; poll get_call_result until finished is true (a call takes roughly 30 s to a few minutes), or set wait_seconds to wait here for up to 110 s. ' +
+        'Internally this creates and launches a one-recipient campaign, so the call also appears in the dashboard. It returns immediately with a campaign_id; poll get_call_result until finished is true (a call takes roughly 30 s to a few minutes), or set wait_seconds to wait here for up to ' + String(maxWait) + ' s. ' +
         'To collect structured answers (e.g. "did they agree to a callback?") declare outcome_fields; otherwise you only get a transcript and free-text summary.',
       inputSchema: {
         to: phoneSchema.describe('Number to call, E.164.'),
@@ -108,9 +108,9 @@ export function callTools(ctx: ToolContext): AnyToolSpec[] {
           .number()
           .int()
           .min(0)
-          .max(MAX_WAIT_SECONDS)
+          .max(maxWait)
           .optional()
-          .describe(`Wait up to this long for the call to finish and return its result. Default 0 (return immediately). Max ${MAX_WAIT_SECONDS}.`),
+          .describe(`Wait up to this long for the call to finish and return its result. Default 0 (return immediately). Max ${maxWait}.`),
       },
       handler: async (args) => {
         const label = args.name ?? args.to;

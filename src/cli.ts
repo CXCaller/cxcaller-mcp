@@ -12,13 +12,22 @@ Usage:
     --port <n>                    Default 3333 (or $PORT)
     --host <addr>                 Default 127.0.0.1. Use 0.0.0.0 only behind TLS.
 
-Environment:
-  CXCALLER_API_KEY                API key (required for stdio; optional fallback for HTTP)
+Environment (both modes):
+  CXCALLER_API_KEY                API key. stdio only: the HTTP server never uses one of its own
   CXCALLER_API_URL                Default https://api.cxcaller.com
   CXCALLER_MCP_READ_ONLY=true     Hide every tool that places calls or changes data
   CXCALLER_MCP_TOOLSETS           Comma list of: account,contacts,campaigns,calls,analytics (default all)
   CXCALLER_MCP_MAX_RECIPIENTS     Largest campaign that may be launched (default 1000)
+  CXCALLER_MCP_MAX_WAIT_SECONDS   Longest make_call may wait for a call to end (default 80)
   CXCALLER_MCP_TIMEOUT_MS         Per-request API timeout (default 30000)
+
+Environment (--http, hosted):
+  CXCALLER_MCP_ALLOWED_HOSTS      Comma list of host names to serve, e.g. mcp.cxcaller.com
+  CXCALLER_MCP_TRUST_PROXY=true   Read the client address from CF-Connecting-IP / X-Forwarded-For
+  CXCALLER_MCP_RATE_LIMIT_PER_MINUTE   Per organization (default 300)
+  CXCALLER_MCP_MAX_CONCURRENT     In-flight requests per organization (default 8)
+  CXCALLER_MCP_FAILED_AUTH_PER_MINUTE  Rejected keys per client address before blocking (default 30)
+  CXCALLER_MCP_SHUTDOWN_GRACE_MS  How long SIGTERM waits for in-flight requests (default 100000)
 `;
 
 function option(args: string[], name: string): string | undefined {

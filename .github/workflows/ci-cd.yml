@@ -1,0 +1,96 @@
+name: CI/CD
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+env:
+  GAR_LOCATION: us-central1
+  GAR_REPOSITORY: cxcaller
+  IMAGE_NAME: cxcaller-mcp
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4 # version comes from package.json "packageManager"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm typecheck
+      - run: pnpm test
+      - run: pnpm build
+
+  build-and-push:
+    # Deploys only from main, and only after the tests pass.
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: test
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: write
+      id-token: write # Workload Identity Federation -- no JSON key
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - id: auth
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ vars.GCP_SERVICE_ACCOUNT }}
+
+      - uses: google-github-actions/setup-gcloud@v2
+
+      - run: gcloud auth configure-docker ${{ env.GAR_LOCATION }}-docker.pkg.dev --quiet
+
+      - uses: docker/setup-buildx-action@v3
+
+      - id: meta
+        run: echo "sha_short=$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          # No build args and no secrets: the server holds none. Every tenant
+          # brings their own API key; per-deployment settings come from the
+          # Helm chart in cxcaller-infra.
+          tags: |
+            ${{ env.GAR_LOCATION }}-docker.pkg.dev/${{ vars.GCP_PROJECT_ID }}/${{ env.GAR_REPOSITORY }}/${{ env.IMAGE_NAME }}:${{ steps.meta.outputs.sha_short }}
+            ${{ env.GAR_LOCATION }}-docker.pkg.dev/${{ vars.GCP_PROJECT_ID }}/${{ env.GAR_REPOSITORY }}/${{ env.IMAGE_NAME }}:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # GitOps: bump the image tag in cxcaller-infra instead of deploying
+      # directly -- ArgoCD (auto-sync + self-heal) picks this up and reconciles
+      # the cluster to match.
+      - name: Bump image tag in cxcaller-infra
+        env:
+          GIT_SSH_COMMAND: "ssh -o StrictHostKeyChecking=no"
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.CXCALLER_INFRA_DEPLOY_KEY }}" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          export GIT_SSH_COMMAND="ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=no"
+
+          git clone --depth 1 git@github.com:CXCaller/cxcaller-infra.git infra
+          cd infra
+
+          sed -i "s|tag: \".*\" # ci:image-tag|tag: \"${{ steps.meta.outputs.sha_short }}\" # ci:image-tag|" \
+            charts/cxcaller-mcp/values-prod.yaml
+
+          git config user.name "cxcaller-mcp-ci"
+          git config user.email "ci@cxcaller.com"
+          git commit -am "cxcaller-mcp: deploy ${{ steps.meta.outputs.sha_short }}" || exit 0
+          git push origin main

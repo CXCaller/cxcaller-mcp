@@ -3,12 +3,17 @@ import type { AddressInfo } from 'node:net';
 
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { createHttpServer, extractKey, MemoryIdentityCache } from '../src/http.js';
 import { fakeApi, KEY, ORG_ID, testConfig, whoamiRoute, type Handler } from './helpers.js';
 
 const servers: http.Server[] = [];
+
+// Request logs go to stderr; keep test output readable.
+beforeEach(() => {
+  vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+});
 
 async function start(routes: Record<string, Handler> = {}, env: Record<string, string> = {}) {
   const api = fakeApi({
@@ -28,6 +33,7 @@ async function start(routes: Record<string, Handler> = {}, env: Record<string, s
 }
 
 afterEach(async () => {
+  vi.restoreAllMocks();
   await Promise.all(servers.splice(0).map((server) => new Promise((resolve) => server.close(resolve))));
 });
 
@@ -121,7 +127,7 @@ describe('Streamable HTTP transport', () => {
     const response = await fetch(`${url}/mcp`, { method: 'GET', headers: { Authorization: `Bearer ${KEY}` } });
 
     expect(response.status).toBe(405);
-    expect(response.headers.get('allow')).toBe('POST');
+    expect(response.headers.get('allow')).toBe('POST, OPTIONS');
   });
 
   it('rejects invalid JSON', async () => {
@@ -143,7 +149,7 @@ describe('Streamable HTTP transport', () => {
     const { port } = await start();
     const { request } = await import('node:http');
     const status = await new Promise<number>((resolve, reject) => {
-      const req = request({ host: '127.0.0.1', port, path: '/healthz', headers: { Host: 'evil.example.com' } }, (res) => {
+      const req = request({ host: '127.0.0.1', port, path: '/mcp', method: 'POST', headers: { Host: 'evil.example.com', 'Content-Type': 'application/json' } }, (res) => {
         res.resume();
         resolve(res.statusCode ?? 0);
       });
