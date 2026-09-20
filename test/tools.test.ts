@@ -321,6 +321,56 @@ describe('make_call', () => {
   });
 });
 
+describe('retry_campaign_recipient', () => {
+  const RECIPIENT = '55555555-5555-4555-8555-555555555555';
+  const retryRoute = `POST ${C}/${CAMPAIGN_ID}/recipients/${RECIPIENT}/retry`;
+  const withStatus = (status: string) =>
+    campaignRoutes({
+      [`GET ${C}/${CAMPAIGN_ID}`]: () => ({ json: { id: CAMPAIGN_ID, status } }),
+      [retryRoute]: () => ({ status: 201, json: {} }),
+    });
+
+  it('queues the retry on a running campaign', async () => {
+    const { call, api } = await connect(withStatus('running'));
+    const result = await call('retry_campaign_recipient', { campaign_id: CAMPAIGN_ID, recipient_id: RECIPIENT });
+
+    expect(result.isError).toBe(false);
+    expect(api.sequence()).toContain(`POST /campaigns/${CAMPAIGN_ID}/recipients/${RECIPIENT}/retry`);
+    expect((result.json as { note: string }).note).toMatch(/within about 20 seconds/);
+  });
+
+  it('says nothing will be dialed until resume on a paused campaign', async () => {
+    const { call } = await connect(withStatus('paused'));
+    const result = await call('retry_campaign_recipient', { campaign_id: CAMPAIGN_ID, recipient_id: RECIPIENT });
+
+    expect((result.json as { note: string }).note).toMatch(/resume/);
+  });
+
+  it.each(['completed', 'cancelled', 'failed'])(
+    'refuses on a %s campaign instead of reporting a retry that will never be dialed',
+    async (status) => {
+      const { call, api } = await connect(withStatus(status));
+      const result = await call('retry_campaign_recipient', { campaign_id: CAMPAIGN_ID, recipient_id: RECIPIENT });
+
+      expect(result.isError).toBe(true);
+      expect(result.text).toMatch(new RegExp(`is ${status}`));
+      expect(result.text).toMatch(/create a new campaign/);
+      expect(api.sequence().some((entry) => entry.endsWith('/retry'))).toBe(false);
+    },
+  );
+
+  it('explains a recipient that is not in a retryable state', async () => {
+    const { call } = await connect({
+      ...withStatus('running'),
+      [retryRoute]: () => ({ status: 409, json: { message: 'error.campaign_recipient_not_retryable' } }),
+    });
+    const result = await call('retry_campaign_recipient', { campaign_id: CAMPAIGN_ID, recipient_id: RECIPIENT });
+
+    expect(result.isError).toBe(true);
+    expect(result.text).toMatch(/no_answer, failed or exhausted/);
+  });
+});
+
 describe('get_call_result', () => {
   it('reports finished from the campaign status and fetches the latest calls in full', async () => {
     const { call, api } = await connect({

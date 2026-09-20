@@ -277,6 +277,9 @@ export async function withProgress<T>(
   }
 }
 
+/** Statuses the dispatcher never dials from again. */
+const DEAD_CAMPAIGN_STATUSES = new Set(['completed', 'cancelled', 'failed']);
+
 const idShape = { campaign_id: uuidSchema.describe('Campaign id.') };
 
 // ---- Tools ----------------------------------------------------------------------
@@ -462,10 +465,31 @@ export function campaignTools(ctx: ToolContext): AnyToolSpec[] {
       mutating: true,
       reachesPeople: true,
       description:
-        'Puts a finished recipient (no_answer, failed or exhausted) back in the queue for another attempt. If the campaign is running this leads to another call soon. Use the recipient id from list_campaign_recipients.',
+        'Puts a recipient whose status is no_answer, failed or exhausted back in the queue for another attempt (any other status is rejected). ' +
+        'It only gets dialed while the campaign is RUNNING: on a paused campaign it waits for resume, and a completed, cancelled or failed campaign is never dialed again, so this refuses there. ' +
+        'To call people from a finished campaign again, create a new campaign for them. Use the recipient id from list_campaign_recipients.',
       inputSchema: { ...idShape, recipient_id: uuidSchema },
-      handler: ({ campaign_id, recipient_id }) =>
-        client.orgPost(`/campaigns/${campaign_id}/recipients/${recipient_id}/retry`),
+      handler: async ({ campaign_id, recipient_id }) => {
+        const { status } = await client.orgGet<{ status: string }>(`/campaigns/${campaign_id}`);
+
+        // The API would accept this and report success, but the dispatcher only dials running
+        // campaigns, so nothing would ever happen and the agent would tell the user it had.
+        if (DEAD_CAMPAIGN_STATUSES.has(status)) {
+          throw new ToolError(
+            `This campaign is ${status}, and the platform never dials a ${status} campaign again, so retrying a recipient here would do nothing. To call these people again, create a new campaign (create_campaign) with the same recipients.`,
+          );
+        }
+
+        await client.orgPost(`/campaigns/${campaign_id}/recipients/${recipient_id}/retry`);
+
+        return {
+          retried: recipient_id,
+          note:
+            status === 'paused'
+              ? 'Queued. The campaign is paused, so nothing is dialed until you resume it.'
+              : 'Queued for another attempt. It will be dialed within about 20 seconds if the campaign is running and inside its calling window.',
+        };
+      },
     }),
 
     defineTool({
