@@ -209,16 +209,7 @@ export async function attachRecipients(
   const result: Record<string, unknown> = {};
 
   if (sources.recipients?.length) {
-    result.imported = await client.orgPost(`/campaigns/${campaignId}/contacts/import`, {
-      contacts: sources.recipients.map((recipient) =>
-        compact({
-          phoneE164: recipient.phone,
-          contactName: recipient.name,
-          language: recipient.language,
-          variables: recipient.variables,
-        }),
-      ),
-    });
+    result.imported = await importRecipients(client, campaignId, sources.recipients);
   }
 
   if (sources.group_ids?.length || sources.contact_ids?.length) {
@@ -229,6 +220,78 @@ export async function attachRecipients(
   }
 
   return result;
+}
+
+interface ContactsPage {
+  data: Array<{ id: string }>;
+}
+
+/**
+ * `/contacts/import` intermittently 500s on the platform (a known fault: see the
+ * troubleshooting table in docs/usage-guide.md). A 5xx there used to leave the tool
+ * call failing with a surviving draft campaign that had to be fixed by hand — find or
+ * create each contact, then attach by id. That fallback is exactly what this does
+ * automatically, so a transient platform fault doesn't require manual recovery.
+ * A 4xx (bad phone number, etc.) is a real request problem, not a platform fault, so
+ * it is left to propagate unchanged.
+ */
+async function importRecipients(
+  client: CxCallerClient,
+  campaignId: string,
+  recipients: RecipientInput[],
+): Promise<Record<string, unknown>> {
+  try {
+    return await client.orgPost(`/campaigns/${campaignId}/contacts/import`, {
+      contacts: recipients.map((recipient) =>
+        compact({
+          phoneE164: recipient.phone,
+          contactName: recipient.name,
+          language: recipient.language,
+          variables: recipient.variables,
+        }),
+      ),
+    });
+  } catch (error) {
+    if (!(error instanceof CxCallerApiError) || error.status < 500) {
+      throw error;
+    }
+
+    const contactIds = await Promise.all(recipients.map((recipient) => findOrCreateContact(client, recipient)));
+    const attached = await client.orgPost<Record<string, unknown>>(`/campaigns/${campaignId}/recipients`, { contactIds });
+    const droppedVariables = recipients.some((recipient) => recipient.variables && Object.keys(recipient.variables).length > 0);
+
+    return {
+      ...attached,
+      fallback:
+        `contacts/import returned ${error.status}, a platform-side fault; attached by contact id instead.` +
+        (droppedVariables ? ' Per-recipient `variables` could not be carried over through this fallback and were dropped.' : ''),
+    };
+  }
+}
+
+/** Creates the contact, or looks up the existing one if the phone number is already a contact. */
+async function findOrCreateContact(client: CxCallerClient, recipient: RecipientInput): Promise<string> {
+  try {
+    const created = await client.orgPost<{ id: string }>(
+      '/contacts',
+      compact({ phoneE164: recipient.phone, firstName: recipient.name, language: recipient.language }),
+    );
+
+    return created.id;
+  } catch (error) {
+    if (!(error instanceof CxCallerApiError) || error.code !== 'error.contact_phone_already_exists') {
+      throw error;
+    }
+
+    const existing = await client.orgGet<ContactsPage>('/contacts', { q: recipient.phone, take: 1 });
+    const match = existing.data[0];
+
+    if (!match) {
+      throw error;
+    }
+
+    return match.id;
+  }
 }
 
 interface Page {
