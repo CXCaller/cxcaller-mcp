@@ -409,7 +409,7 @@ you a draft* before launching anything large; and start with one test call.
 | `finished: false` for a long time | Call still in progress, or waiting in the queue | Poll every ~5 s; check the campaign status |
 | `429` "Rate limit" | Too many requests for the organization | Wait for `Retry-After` seconds |
 | "Refusing to launch: … above this server's limit" | Campaign exceeds the recipient cap | Split it into smaller campaigns |
-| `500` on adding recipients | A platform-side fault | Not something you can fix: contact support with the `X-Request-Id` from the response |
+| `500` on adding recipients via `recipients` (phone numbers) | A known platform-side fault in `/contacts/import` | Handled automatically: on a `5xx` the tool falls back to finding-or-creating each contact and attaching by id. If that fallback also fails, contact support with the `X-Request-Id` from the response |
 | Duplicate contact (`409`) | That number already exists | Find it with `list_contacts` instead of creating it |
 
 For any server-side problem, quote the **`X-Request-Id`** response header when

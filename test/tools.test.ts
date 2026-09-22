@@ -319,6 +319,44 @@ describe('make_call', () => {
     expect(result.text).toContain(CAMPAIGN_ID);
     expect(api.sequence().some((entry) => entry.endsWith('/launch'))).toBe(false);
   });
+
+  const CONTACT_ID = '66666666-6666-4666-8666-666666666666';
+
+  it('falls back to find-or-create-contact and still dials when contacts/import 500s (a known platform fault)', async () => {
+    const { call, api } = await connect({
+      ...callRoutes(),
+      [`POST ${C}/${CAMPAIGN_ID}/contacts/import`]: () => ({ status: 500, json: { message: 'boom' } }),
+      [`POST /organizations/${ORG_ID}/contacts`]: () => ({ status: 201, json: { id: CONTACT_ID } }),
+    });
+    const result = await call('make_call', { to: '+94771234567', name: 'Nimal', instructions: 'Ask about the parcel.' });
+
+    expect(result.isError).toBe(false);
+    expect(api.sequence().some((entry) => entry.endsWith('/launch'))).toBe(true);
+
+    const createdContact = api.calls.find((c) => c.method === 'POST' && c.path.endsWith('/contacts'));
+
+    expect(createdContact?.body).toEqual({ phoneE164: '+94771234567', firstName: 'Nimal' });
+
+    const attach = api.calls.find((c) => c.method === 'POST' && c.path.endsWith(`${CAMPAIGN_ID}/recipients`));
+
+    expect(attach?.body).toEqual({ contactIds: [CONTACT_ID] });
+  });
+
+  it('looks up the existing contact when the fallback create hits a duplicate phone number', async () => {
+    const { call, api } = await connect({
+      ...callRoutes(),
+      [`POST ${C}/${CAMPAIGN_ID}/contacts/import`]: () => ({ status: 502, json: { message: 'bad gateway' } }),
+      [`POST /organizations/${ORG_ID}/contacts`]: () => ({ status: 409, json: { message: 'error.contact_phone_already_exists' } }),
+      [`GET /organizations/${ORG_ID}/contacts`]: () => ({ json: { data: [{ id: CONTACT_ID }] } }),
+    });
+    const result = await call('make_call', { to: '+94771234567', instructions: 'Hi' });
+
+    expect(result.isError).toBe(false);
+
+    const attach = api.calls.find((c) => c.method === 'POST' && c.path.endsWith(`${CAMPAIGN_ID}/recipients`));
+
+    expect(attach?.body).toEqual({ contactIds: [CONTACT_ID] });
+  });
 });
 
 describe('retry_campaign_recipient', () => {
