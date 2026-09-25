@@ -151,6 +151,16 @@ draft ──launch──▶ scheduled ──(≈20 s)──▶ running ──▶
   └──reactivate── cancelled ◀──cancel────── paused
 ```
 
+- **Launch needs an approved content review.** The platform checks every
+  campaign's instructions, objective and per-person prompt overrides against its
+  community guidelines before it may launch. `launch_campaign` (and `make_call`)
+  submit the campaign and wait for the verdict, which usually takes under a minute.
+  One the review won't pass automatically is **flagged** for a CXCaller admin and
+  can't launch until they approve it; one an admin **rejects** needs new content.
+  Nothing is dialed in either case. To learn the verdict before you commit, ask
+  for `verify_campaign` on the draft.
+- Changing the instructions or objective **voids the approval**: the campaign
+  is reviewed again at the next launch, and a `scheduled` one goes back to `draft`.
 - A campaign is **editable only as a `draft` or `scheduled`**. Once running,
   paused or finished it is locked; to change one, cancel it, then reactivate it
   back to a draft.
@@ -200,7 +210,8 @@ who said what. Two rules:
 > once, retry no-answers once. Show it to me before you launch."
 
 The agent calls `create_campaign` with the agent settings, schedule and the group,
-and stops at the draft. You review it with `get_campaign`. Then:
+and stops at the draft. You review it with `get_campaign`, and `verify_campaign`
+tells you whether the platform's content review passes it. Then:
 
 > "Looks good. Launch it."
 
@@ -370,6 +381,9 @@ The server is built so an agent can't easily do something you didn't intend.
 
 - **Drafts first.** `create_campaign` doesn't dial. Launching is a separate,
   explicit step (`launch_campaign`, or `launch: true`).
+- **Content review.** The platform dials only campaigns whose content its review
+  has approved. Flagged content waits for a CXCaller admin; nothing is dialed
+  meanwhile.
 - **Launch size cap.** A campaign with more than **1,000 recipients** is refused at
   launch, however the recipients were added. Nothing is dialed. (Ask the operator
   if you need it raised.)
@@ -399,6 +413,9 @@ you a draft* before launching anything large; and start with one test call.
 | `403` "Forbidden host" | Wrong URL or a proxy rewriting `Host` | Use exactly `https://mcp.cxcaller.com/mcp` |
 | `403` "API keys cannot use this endpoint" | The action is off-limits to keys by design | Do it in the dashboard (managing members, keys, numbers) |
 | `error.campaign_incomplete` with `missing: […]` | Launch needs `recipients`, `caller_id`, or `agent` (instructions) | Fix what's listed, then launch again |
+| "Not launched: content verification is "flagged"" | The platform's content review held the campaign for a CXCaller admin | Wait for an admin to approve it (check `reviewStatus` with `get_campaign`), or rewrite the instructions and launch again |
+| "Not launched: content verification is "rejected"" | An admin rejected the content | Change the instructions or objective with `update_campaign`, then launch again |
+| "Not launched: content verification is "pending"" | The review hasn't answered yet | Call `launch_campaign` again in a minute; it continues the same review |
 | "Use E.164 format" | Phone number isn't `+<country code><number>` | Use `+94771234567`: no spaces, dashes or leading `0` |
 | "Failed at '…'" and a campaign id | A multi-step tool stopped partway | The draft **exists and nothing was dialed**. Fix the problem and continue with `update_campaign` / `add_campaign_recipients` / `launch_campaign`, or `delete_campaign` |
 | `error.campaign_not_editable` | Campaign is running, paused or finished | `control_campaign` `cancel`, then `reactivate`, then edit |

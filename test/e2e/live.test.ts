@@ -6,6 +6,8 @@
  *
  * It logs in, creates an organization and an API key of its own, and uses only
  * that key from then on. Nothing dials unless the platform's workers are running.
+ * Launching also needs cxcaller-agents' content reviewer to approve the campaign;
+ * without it the launch tests are skipped, saying so.
  */
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
@@ -16,6 +18,10 @@ const EMAIL = process.env.CXCALLER_E2E_EMAIL;
 const PASSWORD = process.env.CXCALLER_E2E_PASSWORD;
 
 const enabled = Boolean(URL_ && EMAIL && PASSWORD);
+
+// The reviewer polls every ~15 s, then asks a model; keep this under the 60 s test timeout.
+const MAX_WAIT_SECONDS = '45';
+const REVIEW_UNANSWERED = /content verification is "pending"/;
 
 async function api<T>(method: string, path: string, token: string | undefined, body?: unknown): Promise<T> {
   const response = await fetch(`${URL_}${path}`, {
@@ -62,7 +68,12 @@ describe.skipIf(!enabled)('live: built MCP over stdio against a real API', () =>
       new StdioClientTransport({
         command: process.execPath,
         args: ['dist/cli.js'],
-        env: { PATH: process.env.PATH ?? '', CXCALLER_API_URL: URL_!, CXCALLER_API_KEY: apiKey },
+        env: {
+          PATH: process.env.PATH ?? '',
+          CXCALLER_API_URL: URL_!,
+          CXCALLER_API_KEY: apiKey,
+          CXCALLER_MCP_MAX_WAIT_SECONDS: MAX_WAIT_SECONDS,
+        },
         stderr: 'ignore',
       }),
     );
@@ -199,10 +210,30 @@ describe.skipIf(!enabled)('live: built MCP over stdio against a real API', () =>
     expect((await tool('list_campaign_recipients', { campaign_id: campaignId })).json.meta.itemCount).toBe(3);
   });
 
-  it('launch_campaign dispatches: the campaign leaves draft', async () => {
+  it('verify_campaign submits the draft to the real review', async () => {
+    const verified = await tool('verify_campaign', { campaign_id: campaignId });
+
+    expect(verified.isError, verified.text).toBe(false);
+    expect(['pending', 'approved', 'flagged']).toContain(verified.json.reviewStatus);
+  });
+
+  it('editing the instructions voids the verification', async () => {
+    const updated = await tool('update_campaign', {
+      campaign_id: campaignId,
+      instructions: 'You are calling {{contact_name}} from IIT to confirm a payment date.',
+    });
+
+    expect(updated.json.reviewStatus).toBe('unverified');
+  });
+
+  let launchedCampaign = false;
+
+  it('launch_campaign verifies, then dispatches: the campaign leaves draft', async ({ skip }) => {
     const launched = await tool('launch_campaign', { campaign_id: campaignId });
 
+    skip(REVIEW_UNANSWERED.test(launched.text), 'content reviewer (cxcaller-agents) did not answer');
     expect(launched.isError, launched.text).toBe(false);
+    launchedCampaign = true;
     expect(launched.json.status).toBe('scheduled');
 
     const relaunch = await tool('launch_campaign', { campaign_id: campaignId });
@@ -222,14 +253,17 @@ describe.skipIf(!enabled)('live: built MCP over stdio against a real API', () =>
   });
 
   it('control_campaign cancels, then delete_campaign removes it', async () => {
-    const cancelled = await tool('control_campaign', { campaign_id: campaignId, action: 'cancel' });
+    if (launchedCampaign) {
+      const cancelled = await tool('control_campaign', { campaign_id: campaignId, action: 'cancel' });
 
-    expect(cancelled.isError, cancelled.text).toBe(false);
+      expect(cancelled.isError, cancelled.text).toBe(false);
+    }
+
     expect((await tool('delete_campaign', { campaign_id: campaignId })).json).toEqual({ deleted: campaignId });
     expect((await tool('get_campaign', { campaign_id: campaignId })).isError).toBe(true);
   });
 
-  it('make_call queues a single call as a launched one-recipient campaign', async () => {
+  it('make_call queues a single call as a launched one-recipient campaign', async ({ skip }) => {
     const result = await tool('make_call', {
       to: '+94771000009',
       name: 'Test Person',
@@ -238,6 +272,7 @@ describe.skipIf(!enabled)('live: built MCP over stdio against a real API', () =>
       outcome_fields: [{ key: 'arrived', label: 'Arrived?', type: 'boolean' }],
     });
 
+    skip(REVIEW_UNANSWERED.test(result.text), 'content reviewer (cxcaller-agents) did not answer');
     expect(result.isError, result.text).toBe(false);
     expect(result.json.finished).toBe(false);
     expect(result.json.campaign.status).toBe('scheduled');

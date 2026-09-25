@@ -73,7 +73,8 @@ export function callTools(ctx: ToolContext): AnyToolSpec[] {
       reachesPeople: true,
       description:
         'PLACES A REAL PHONE CALL to one person, made by an AI voice agent following your `instructions`. Only call this when the user has asked you to call this number, and never to numbers they did not give you. ' +
-        'Dialing starts within about 20 seconds (the platform dispatches on a 20 s cycle) and the call is made once unless max_attempts says otherwise. ' +
+        'Before dialing, the platform\'s content review must approve the instructions; this waits for it (usually under a minute). If it flags or rejects them, nothing is dialed and the error says why. ' +
+        'Dialing then starts within about 20 seconds (the platform dispatches on a 20 s cycle) and the call is made once unless max_attempts says otherwise. ' +
         'Internally this creates and launches a one-recipient campaign, so the call also appears in the dashboard. It returns immediately with a campaign_id; poll get_call_result until finished is true (a call takes roughly 30 s to a few minutes), or set wait_seconds to wait here for up to ' + String(maxWait) + ' s. ' +
         'To collect structured answers (e.g. "did they agree to a callback?") declare outcome_fields; otherwise you only get a transcript and free-text summary.',
       inputSchema: {
@@ -110,9 +111,14 @@ export function callTools(ctx: ToolContext): AnyToolSpec[] {
           .min(0)
           .max(maxWait)
           .optional()
-          .describe(`Wait up to this long for the call to finish and return its result. Default 0 (return immediately). Max ${maxWait}.`),
+          .describe(
+            `Wait up to this long for the call to finish and return its result. Default 0 (return immediately). Max ${maxWait}; time spent waiting for the content review counts toward that ${maxWait} s ceiling.`,
+          ),
       },
       handler: async (args) => {
+        // One budget for the content review and the wait for the call, so the request
+        // stays under maxWait in total (a proxy in front of hosted mode cuts off at 100 s).
+        const deadline = Date.now() + maxWait * 1000;
         const label = args.name ?? args.to;
         const campaign = await withProgress(undefined, 'create call', () =>
           client.orgPost<{ id: string }>('/campaigns', {
@@ -142,9 +148,11 @@ export function callTools(ctx: ToolContext): AnyToolSpec[] {
           }),
         );
 
-        await withProgress(id, 'dispatch', () => launchWithGuard(ctx, id));
+        await withProgress(id, 'dispatch', () =>
+          launchWithGuard(ctx, id, Math.max(0, (deadline - Date.now()) / 1000)),
+        );
 
-        const wait = args.wait_seconds ?? 0;
+        const wait = Math.min(args.wait_seconds ?? 0, Math.max(0, (deadline - Date.now()) / 1000));
 
         if (wait > 0) {
           await waitUntilFinished(client, id, wait);
