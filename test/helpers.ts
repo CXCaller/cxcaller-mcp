@@ -14,6 +14,8 @@ export interface Recorded {
   method: string;
   path: string;
   query: Record<string, string>;
+  /** The raw query string, for repeated parameters that `query` collapses. */
+  search: string;
   body: unknown;
   headers: Record<string, string>;
 }
@@ -43,6 +45,7 @@ export function fakeApi(routes: Record<string, Handler>) {
       method,
       path: url.pathname,
       query: Object.fromEntries(url.searchParams),
+      search: url.search,
       body: init?.body ? JSON.parse(String(init.body)) : undefined,
       headers: Object.fromEntries(Object.entries((init?.headers ?? {}) as Record<string, string>)),
     };

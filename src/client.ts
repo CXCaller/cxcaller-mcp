@@ -1,4 +1,5 @@
-export type Query = Record<string, string | number | boolean | undefined | null>;
+/** An array value is sent as a repeated parameter (`?status=a&status=b`). */
+export type Query = Record<string, string | number | boolean | readonly string[] | undefined | null>;
 
 export interface RequestOptions {
   query?: Query;
@@ -40,7 +41,8 @@ const HINTS: Record<string, string> = {
   'error.campaign_not_launchable': 'Only a draft campaign can be launched.',
   'error.campaign_invalid_transition':
     'That action is not valid for the campaign\'s current status. Read the campaign\'s status and follow the lifecycle: draft → scheduled → running ⇄ paused → completed; cancelled → reactivate → draft.',
-  'error.campaign_not_deletable': 'Only draft or cancelled campaigns can be deleted.',
+  'error.campaign_not_deletable':
+    'Only draft, cancelled, completed or failed campaigns can be deleted. Cancel a scheduled, running or paused one first (control_campaign).',
   'error.campaign_caller_id_invalid':
     'Use caller_id.source "shared_pool" with no number, or "dedicated" with a phone_number_id this organization has claimed.',
   'error.campaign_recipients_source_required': 'Provide at least one of group_ids / contact_ids.',
@@ -187,7 +189,11 @@ export class CxCallerClient {
     const url = new URL(this.options.baseUrl + path);
 
     for (const [key, value] of Object.entries(options.query ?? {})) {
-      if (value !== undefined && value !== null && value !== '') {
+      if (Array.isArray(value)) {
+        for (const entry of value) {
+          url.searchParams.append(key, entry);
+        }
+      } else if (value !== undefined && value !== null && value !== '') {
         url.searchParams.set(key, String(value));
       }
     }

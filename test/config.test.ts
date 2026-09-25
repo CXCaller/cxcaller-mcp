@@ -13,7 +13,7 @@ describe('loadConfig', () => {
       maxRecipients: 1000,
       requestTimeoutMs: 30_000,
     });
-    expect([...config.toolsets].sort()).toEqual(['account', 'analytics', 'calls', 'campaigns', 'contacts']);
+    expect([...config.toolsets].sort()).toEqual(['account', 'analytics', 'calls', 'campaigns', 'contacts', 'support']);
   });
 
   it('strips trailing slashes from the API URL', () => {

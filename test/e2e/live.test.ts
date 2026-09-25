@@ -127,6 +127,26 @@ describe.skipIf(!enabled)('live: built MCP over stdio against a real API', () =>
 
     expect(group.isError).toBe(false);
     expect((await tool('list_contact_groups')).json.map((g: any) => g.name)).toContain(`g-${nonce}`);
+
+    const renamed = await tool('update_contact_group', { group_id: group.json.id, name: `vip-${nonce}`, description: null });
+
+    expect(renamed.isError, renamed.text).toBe(false);
+    expect((await tool('get_contact_group', { group_id: group.json.id })).json).toMatchObject({ name: `vip-${nonce}` });
+
+    const trimmed = await tool('remove_contacts_from_group', { group_id: group.json.id, contact_ids: [created.json.id] });
+
+    expect(trimmed.isError, trimmed.text).toBe(false);
+    expect((await tool('list_contacts', { group_id: group.json.id })).json.data).toHaveLength(0);
+    expect((await tool('delete_contact_group', { group_id: group.json.id })).json).toEqual({ deleted: group.json.id });
+    expect((await tool('get_contact', { contact_id: created.json.id })).isError).toBe(false);
+  });
+
+  it('lists available dedicated numbers and reads a pool number', async () => {
+    const available = await tool('list_available_numbers', { take: 5 });
+    const pool = (await tool('list_caller_ids', { include: 'pool', take: 1 })).json.sharedPool.data;
+
+    expect(available.isError, available.text).toBe(false);
+    expect((await tool('get_phone_number', { phone_number_id: pool[0].id })).json).toMatchObject({ id: pool[0].id });
   });
 
   let campaignId = '';
@@ -252,6 +272,36 @@ describe.skipIf(!enabled)('live: built MCP over stdio against a real API', () =>
     expect(outcomes.json.recipients.data).toHaveLength(3);
   });
 
+  it('reads, edits and removes individual recipients', async () => {
+    const [first, second] = (await tool('list_campaign_recipients', { campaign_id: campaignId })).json.data;
+    const updated = await tool('update_campaign_recipients', {
+      campaign_id: campaignId,
+      updates: [{ recipient_id: first.id, variables: { due_date: '21 May' } }],
+    });
+
+    expect(updated.isError, updated.text).toBe(false);
+    expect((await tool('get_campaign_recipient', { campaign_id: campaignId, recipient_id: first.id })).json.variables).toMatchObject({
+      due_date: '21 May',
+    });
+    expect((await tool('get_live_calls', { campaign_id: campaignId })).isError).toBe(false);
+
+    const removed = await tool('remove_campaign_recipients', { campaign_id: campaignId, recipient_ids: [second.id] });
+
+    expect(removed.isError, removed.text).toBe(false);
+    expect((await tool('list_campaign_recipients', { campaign_id: campaignId })).json.meta.itemCount).toBe(2);
+  });
+
+  it('duplicate_campaign copies into a fresh draft, and delete_campaigns clears it', async () => {
+    const copy = await tool('duplicate_campaign', { campaign_id: campaignId, name: `E2E copy ${nonce}` });
+
+    expect(copy.isError, copy.text).toBe(false);
+    expect(copy.json).toMatchObject({ status: 'draft', name: `E2E copy ${nonce}` });
+
+    const deleted = await tool('delete_campaigns', { campaign_ids: [copy.json.id] });
+
+    expect(deleted.json).toEqual({ deletedIds: [copy.json.id], skipped: [] });
+  });
+
   it('control_campaign cancels, then delete_campaign removes it', async () => {
     if (launchedCampaign) {
       const cancelled = await tool('control_campaign', { campaign_id: campaignId, action: 'cancel' });
@@ -292,6 +342,43 @@ describe.skipIf(!enabled)('live: built MCP over stdio against a real API', () =>
   it('analytics endpoints respond', async () => {
     expect((await tool('get_analytics_overview', { period: 'week' })).isError).toBe(false);
     expect((await tool('get_analytics_report', { period: 'day' })).isError).toBe(false);
+  });
+
+  it('raises a support ticket under the key\'s name and follows it up', async () => {
+    const opened = await tool('create_support_ticket', {
+      subject: `MCP e2e ${nonce}`,
+      category: 'other',
+      priority: 'low',
+      description: 'Automated test ticket from the MCP e2e suite. Please ignore.',
+    });
+
+    expect(opened.isError, opened.text).toBe(false);
+    expect(opened.json).toMatchObject({ status: 'open', hasUnreadUpdate: false });
+    expect(opened.json.messages[0].authorName).toBe(`API key: mcp-e2e-${nonce}`);
+
+    const listed = await tool('list_support_tickets', { status: ['open', 'waiting_on_you'] });
+
+    expect(listed.json.data.map((t: any) => t.id)).toContain(opened.json.id);
+
+    const replied = await tool('reply_to_support_ticket', { ticket_id: opened.json.id, body: 'Follow-up from the agent.' });
+
+    expect(replied.json.messages).toHaveLength(2);
+    expect((await tool('set_support_ticket_status', { ticket_id: opened.json.id, status: 'resolved' })).json.status).toBe(
+      'resolved',
+    );
+    expect((await tool('get_support_ticket', { ticket_id: opened.json.id })).json.status).toBe('resolved');
+  });
+
+  it('talks to the live chat under the key\'s name', async () => {
+    const sent = await tool('send_support_chat_message', { body: `MCP e2e ${nonce}: automated test, please ignore.` });
+
+    expect(sent.isError, sent.text).toBe(false);
+    expect(sent.json[0]).toMatchObject({ authorName: `API key: mcp-e2e-${nonce}` });
+
+    const read = await tool('get_support_chat');
+
+    expect(read.json.map((m: any) => m.id)).toContain(sent.json[0].id);
+    expect((await tool('get_support_chat', { after: sent.json.at(-1).createdAt })).json).toEqual([]);
   });
 
   it('cannot reach organization management, by design', async () => {

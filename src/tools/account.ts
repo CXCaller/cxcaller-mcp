@@ -1,7 +1,7 @@
 import { z } from 'zod';
 
 import { defineTool, type AnyToolSpec, type ToolContext } from './define.js';
-import { pagingShape } from './shared.js';
+import { pagingShape, uuidSchema } from './shared.js';
 
 export function accountTools({ client }: ToolContext): AnyToolSpec[] {
   return [
@@ -39,6 +39,27 @@ export function accountTools({ client }: ToolContext): AnyToolSpec[] {
 
         return { dedicated, sharedPool: pool };
       },
+    }),
+
+    defineTool({
+      name: 'list_available_numbers',
+      title: 'List available dedicated numbers',
+      toolset: 'account',
+      mutating: false,
+      description:
+        'Dedicated numbers no organization holds yet, which an owner or admin can claim in the CXCaller dashboard to call from exclusively. They cannot be claimed with an API key. Calls can always use the shared pool without claiming anything.',
+      inputSchema: pagingShape,
+      handler: ({ page, take }) => client.orgGet('/phone-numbers/available', { page, take }),
+    }),
+
+    defineTool({
+      name: 'get_phone_number',
+      title: 'Get phone number',
+      toolset: 'account',
+      mutating: false,
+      description: 'One phone number by id: a shared-pool number or one this organization has claimed.',
+      inputSchema: { phone_number_id: uuidSchema },
+      handler: ({ phone_number_id }) => client.orgGet(`/phone-numbers/${phone_number_id}`),
     }),
   ];
 }

@@ -14,7 +14,8 @@ const INSTRUCTIONS = `CXCaller lets you place real phone calls through an AI voi
 - Many people: create_campaign (a draft, nothing is dialed), review it with get_campaign, then launch_campaign. Watch it with get_campaign_stats; read answers with get_campaign_outcomes.
 - Calls reach real people. Only call numbers the user gave you, only when they asked you to, and never guess a number.
 - Declare outcome_fields before calls run if you want structured answers back; they cannot be added to calls that already happened.
-- Phone numbers are E.164 ("+94771234567"). Dialing starts within about 20 seconds of a launch.`;
+- Phone numbers are E.164 ("+94771234567"). Dialing starts within about 20 seconds of a launch.
+- Problems CXCaller staff should look at: create_support_ticket (tracked) or send_support_chat_message (live chat), then read their answers with get_support_ticket / get_support_chat.`;
 
 export function createServer(client: CxCallerClient, config: Config): { server: McpServer; tools: string[] } {
   const server = new McpServer(

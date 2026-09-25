@@ -30,7 +30,7 @@ describe('documentation', () => {
     const notTools = new Set([
       'max_concurrent_calls', 'max_attempts', 'retry_delay_minutes', 'calling_window_start', 'calling_window_end',
       'calling_days', 'scheduled_start_at', 'transfer_to', 'shared_variables', 'voice_id', 'caller_id', 'wait_seconds',
-      'outcome_fields', 'no_answer', 'in_progress', 'needs_attention', 'CXCALLER_API_KEY', 'extracted_data',
+      'outcome_fields', 'no_answer', 'in_progress', 'needs_attention', 'CXCALLER_API_KEY', 'extracted_data', 'context_override',
       // example outcome-field keys used in the guide's recipes
       'promised_date', 'reference_no',
     ]);
