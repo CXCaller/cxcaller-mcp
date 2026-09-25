@@ -28,6 +28,7 @@ plain language, to:
   as yes/no and dates you can count, not just a transcript.
 - **Manage contacts and groups**, and stop calling someone.
 - **Report**: answer rates, call volume, how calls ended.
+- **Get help from CXCaller**: open and follow support tickets, or use the live chat.
 
 Everything the agent does uses the normal platform, so campaigns, contacts and
 call transcripts also appear in the CXCaller dashboard.
@@ -249,6 +250,8 @@ costs a recipient one of its attempts.
 | "What did they say?" | `get_call` (summary, key points, action items, full transcript) |
 | "Give me a link to the recording" | `get_call_recording_url` (expires quickly) |
 | "How many agreed to pay?" | `get_campaign_outcomes` |
+| "Who is it calling right now?" | `get_live_calls` |
+| "Show me everything about Nimal on this campaign" | `get_campaign_recipient` |
 
 ### Retry the ones that failed
 
@@ -265,6 +268,21 @@ The agent finds them with `list_campaign_recipients` (`group: needs_attention`) 
   **create a new campaign** for those people. On a *paused* campaign the retry is
   queued and waits for resume.
 
+### Reuse, tidy and adjust campaigns
+
+> "Run last month's campaign again for the same people." → `duplicate_campaign`
+> "Take Kamal off the campaign before he's called." → `remove_campaign_recipients`
+> "Nimal's due date is now 30 May." → `update_campaign_recipients`
+> "Delete all the old drafts." → `delete_campaigns`
+
+`duplicate_campaign` makes a new **draft** (nothing is dialed) with fresh copies of
+the recipients, and it needs its own content review before launch. Only people still
+waiting to be called can be removed. Changing a person's `variables` is allowed at
+any time, but changing their prompt override (`context_override`) is reviewed
+content, so it needs a draft or scheduled campaign and must be verified again.
+Deleting hides a campaign and keeps its call history; a scheduled, running or paused
+one must be cancelled first.
+
 ### Manage contacts
 
 > "Add Kamal Silva, +94771000002, as a contact and put him in the Overdue group."
@@ -276,6 +294,24 @@ dialer skips any contact that isn't `active` at the moment it would dial, **even
 already on a running campaign**, and the contact keeps its history. `delete_contacts`
 is permanent. A phone number can exist only once per organization, so the agent
 searches with `list_contacts` before creating.
+
+Groups can be renamed (`update_contact_group`), trimmed
+(`remove_contacts_from_group`) or deleted (`delete_contact_group`); none of these
+deletes contacts or changes campaigns the group was already added to.
+
+### Get help from CXCaller
+
+> "Open a ticket: calls to Dialog numbers keep failing on the September campaign."
+> "Has support replied to CX-1042?"
+> "Ask support on chat whether there's an outage."
+
+→ `create_support_ticket`, `list_support_tickets` / `get_support_ticket`,
+`reply_to_support_ticket`, `set_support_ticket_status` (resolve or reopen), and
+`send_support_chat_message` / `get_support_chat` for the live chat. Tickets and chat
+are shared with everyone in your organization's Help Center; what the agent writes
+appears under the **API key's name**, and CXCaller support is notified as usual.
+Support's replies don't email anyone for a ticket an agent opened, so ask the agent
+to check back. A ticket shows `hasUnreadUpdate` while support has the last word.
 
 ### Report
 
@@ -388,7 +424,8 @@ The server is built so an agent can't easily do something you didn't intend.
   launch, however the recipients were added. Nothing is dialed. (Ask the operator
   if you need it raised.)
 - **Your key's reach.** A key acts as a *member* of one organization. It can't manage
-  people or billing, create or revoke keys, or claim phone numbers.
+  people or billing, create or revoke keys, or claim phone numbers
+  (`list_available_numbers` shows what an owner could claim in the dashboard).
 - **Rate limits.** Each organization gets about **300 requests per minute** and **8
   in flight at once**; beyond that the server answers `429` with a `Retry-After`. A
   well-behaved agent never notices. Repeatedly presenting invalid keys temporarily

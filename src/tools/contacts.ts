@@ -171,5 +171,61 @@ export function contactTools({ client, config }: ToolContext): AnyToolSpec[] {
       handler: ({ group_id, contact_ids }) =>
         client.orgPost(`/contact-groups/${group_id}/contacts`, { contactIds: contact_ids }),
     }),
+
+    defineTool({
+      name: 'get_contact_group',
+      title: 'Get contact group',
+      toolset: 'contacts',
+      mutating: false,
+      description: 'One contact group with its contact count. For its members, use list_contacts with group_id.',
+      inputSchema: { group_id: uuidSchema },
+      handler: ({ group_id }) => client.orgGet(`/contact-groups/${group_id}`),
+    }),
+
+    defineTool({
+      name: 'update_contact_group',
+      title: 'Update contact group',
+      toolset: 'contacts',
+      mutating: true,
+      idempotent: true,
+      description: 'Renames a group or changes its description or color. Send only what should change; null clears description or color.',
+      inputSchema: {
+        group_id: uuidSchema,
+        name: z.string().min(1).optional(),
+        description: z.string().nullable().optional(),
+        color: z.string().nullable().optional().describe('Display color in the dashboard, e.g. "#0ea5e9".'),
+      },
+      handler: ({ group_id, ...changes }) => client.orgPatch(`/contact-groups/${group_id}`, compact(changes)),
+    }),
+
+    defineTool({
+      name: 'remove_contacts_from_group',
+      title: 'Remove contacts from group',
+      toolset: 'contacts',
+      mutating: true,
+      idempotent: true,
+      description: 'Takes contacts out of a group. The contacts themselves are kept, and campaigns the group was already added to are unaffected.',
+      inputSchema: {
+        group_id: uuidSchema,
+        contact_ids: z.array(uuidSchema).min(1).max(config.maxRecipients),
+      },
+      handler: ({ group_id, contact_ids }) =>
+        client.orgPost(`/contact-groups/${group_id}/contacts/remove`, { contactIds: contact_ids }),
+    }),
+
+    defineTool({
+      name: 'delete_contact_group',
+      title: 'Delete contact group',
+      toolset: 'contacts',
+      mutating: true,
+      destructive: true,
+      description: 'Deletes a group. Its contacts are kept, and campaigns the group was already added to keep their recipients.',
+      inputSchema: { group_id: uuidSchema },
+      handler: async ({ group_id }) => {
+        await client.orgDelete(`/contact-groups/${group_id}`);
+
+        return { deleted: group_id };
+      },
+    }),
   ];
 }

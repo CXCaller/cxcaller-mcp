@@ -6,6 +6,7 @@ export const TOOLSETS = [
   'campaigns',
   'calls',
   'analytics',
+  'support',
 ] as const;
 
 export type Toolset = (typeof TOOLSETS)[number];

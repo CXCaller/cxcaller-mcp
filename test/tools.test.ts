@@ -85,6 +85,10 @@ describe('tool registration', () => {
     expect(byName.launch_campaign).toMatchObject({ readOnlyHint: false, openWorldHint: true });
     expect(byName.delete_campaign).toMatchObject({ destructiveHint: true });
     expect(byName.delete_contacts).toMatchObject({ destructiveHint: true });
+    expect(byName.delete_campaigns).toMatchObject({ destructiveHint: true });
+    expect(byName.delete_contact_group).toMatchObject({ destructiveHint: true });
+    expect(byName.remove_campaign_recipients).toMatchObject({ destructiveHint: true });
+    expect(byName.create_support_ticket).toMatchObject({ readOnlyHint: false, destructiveHint: false });
     expect(byName.get_campaign).toMatchObject({ readOnlyHint: true, destructiveHint: false });
     expect(byName.update_campaign?.destructiveHint).toBe(false);
   });
@@ -693,5 +697,213 @@ describe('contacts and account', () => {
     });
 
     expect((await call('list_caller_ids')).json).toEqual({ dedicated: { data: [{ id: 'd1' }] }, sharedPool: { data: [{ id: 'p1' }] } });
+  });
+});
+
+describe('campaign management', () => {
+  const RECIPIENT = '55555555-5555-4555-8555-555555555555';
+  const OTHER = '66666666-6666-4666-8666-666666666666';
+
+  it('duplicates into a draft, translating the options', async () => {
+    const { call, api } = await connect({
+      [`POST ${C}/:id/duplicate`]: () => ({ status: 201, json: { id: OTHER, status: 'draft' } }),
+    });
+    const result = await call('duplicate_campaign', { campaign_id: CAMPAIGN_ID, name: 'Again', include_recipients: false });
+
+    expect(result.json).toMatchObject({ id: OTHER, status: 'draft' });
+    expect(api.sequence()).toEqual([`POST /campaigns/${CAMPAIGN_ID}/duplicate`]);
+    expect(api.calls.at(-1)?.body).toEqual({ name: 'Again', includeRecipients: false });
+  });
+
+  it('bulk-deletes and passes on what was skipped', async () => {
+    const skipped = [{ id: OTHER, reason: 'not_deletable' }];
+    const { call, api } = await connect({
+      [`POST ${C}/bulk-delete`]: () => ({ json: { deletedIds: [CAMPAIGN_ID], skipped } }),
+    });
+    const result = await call('delete_campaigns', { campaign_ids: [CAMPAIGN_ID, OTHER] });
+
+    expect(result.json).toEqual({ deletedIds: [CAMPAIGN_ID], skipped });
+    expect(api.calls.at(-1)?.body).toEqual({ campaignIds: [CAMPAIGN_ID, OTHER] });
+  });
+
+  it('updates recipients in one request, sending only what was given', async () => {
+    const { call, api } = await connect({
+      [`PATCH ${C}/:id/recipients`]: () => ({ json: { updated: 2 } }),
+    });
+    const result = await call('update_campaign_recipients', {
+      campaign_id: CAMPAIGN_ID,
+      updates: [
+        { recipient_id: RECIPIENT, variables: { due_date: '21 May' } },
+        { recipient_id: OTHER, context_override: null },
+      ],
+    });
+
+    expect(result.json).toEqual({ updated: 2 });
+    expect(api.sequence()).toEqual([`PATCH /campaigns/${CAMPAIGN_ID}/recipients`]);
+    expect(api.calls.at(-1)?.body).toEqual({
+      updates: [
+        { campaignContactId: RECIPIENT, variables: { due_date: '21 May' } },
+        { campaignContactId: OTHER, contextOverride: null },
+      ],
+    });
+  });
+
+  it('removes recipients and says that dialed ones stay', async () => {
+    const { call, api } = await connect({
+      [`POST ${C}/:id/recipients/bulk-remove`]: () => ({ status: 204 }),
+    });
+    const result = await call('remove_campaign_recipients', { campaign_id: CAMPAIGN_ID, recipient_ids: [RECIPIENT] });
+
+    expect(result.json).toMatchObject({ requested: 1 });
+    expect(result.text).toMatch(/already dialed were kept/);
+    expect(api.calls.at(-1)?.body).toEqual({ campaignContactIds: [RECIPIENT] });
+  });
+
+  it('reads one recipient and the live calls', async () => {
+    const { call, api } = await connect({
+      [`GET ${C}/:id/recipients/:recipientId`]: () => ({ json: { id: RECIPIENT } }),
+      [`GET ${C}/:id/currently-calling`]: () => ({ json: [] }),
+    });
+
+    await call('get_campaign_recipient', { campaign_id: CAMPAIGN_ID, recipient_id: RECIPIENT });
+    await call('get_live_calls', { campaign_id: CAMPAIGN_ID });
+
+    expect(api.sequence()).toEqual([
+      `GET /campaigns/${CAMPAIGN_ID}/recipients/${RECIPIENT}`,
+      `GET /campaigns/${CAMPAIGN_ID}/currently-calling`,
+    ]);
+  });
+});
+
+describe('contact groups', () => {
+  const GROUP = '44444444-4444-4444-8444-444444444444';
+  const G = `/organizations/${ORG_ID}/contact-groups`;
+
+  it('gets, renames, removes members and deletes, in the API vocabulary', async () => {
+    const { call, api } = await connect({
+      [`GET ${G}/:id`]: () => ({ json: { id: GROUP } }),
+      [`PATCH ${G}/:id`]: () => ({ json: { id: GROUP } }),
+      [`POST ${G}/:id/contacts/remove`]: () => ({ json: { id: GROUP } }),
+      [`DELETE ${G}/:id`]: () => ({ status: 204 }),
+    });
+
+    await call('get_contact_group', { group_id: GROUP });
+    await call('update_contact_group', { group_id: GROUP, name: 'VIP', color: null });
+    await call('remove_contacts_from_group', { group_id: GROUP, contact_ids: [CAMPAIGN_ID] });
+    const deleted = await call('delete_contact_group', { group_id: GROUP });
+
+    expect(api.sequence()).toEqual([
+      `GET /contact-groups/${GROUP}`,
+      `PATCH /contact-groups/${GROUP}`,
+      `POST /contact-groups/${GROUP}/contacts/remove`,
+      `DELETE /contact-groups/${GROUP}`,
+    ]);
+    expect(api.calls[2]?.body).toEqual({ name: 'VIP', color: null });
+    expect(api.calls[3]?.body).toEqual({ contactIds: [CAMPAIGN_ID] });
+    expect(deleted.json).toEqual({ deleted: GROUP });
+  });
+});
+
+describe('phone numbers', () => {
+  it('lists available dedicated numbers and reads one', async () => {
+    const NUMBER = '77777777-7777-4777-8777-777777777777';
+    const { call, api } = await connect({
+      [`GET /organizations/${ORG_ID}/phone-numbers/available`]: () => ({ json: { data: [] } }),
+      [`GET /organizations/${ORG_ID}/phone-numbers/:id`]: () => ({ json: { id: NUMBER } }),
+    });
+
+    await call('list_available_numbers', { take: 5 });
+    await call('get_phone_number', { phone_number_id: NUMBER });
+
+    expect(api.sequence()).toEqual(['GET /phone-numbers/available', `GET /phone-numbers/${NUMBER}`]);
+  });
+});
+
+describe('support', () => {
+  const TICKET = '88888888-8888-4888-8888-888888888888';
+  const S = `/organizations/${ORG_ID}/support`;
+
+  it('lists tickets, sending several statuses as a repeated parameter', async () => {
+    const { call, api } = await connect({
+      [`GET ${S}/tickets`]: () => ({ json: { data: [], meta: { itemCount: 0 } } }),
+    });
+
+    await call('list_support_tickets', { status: ['open', 'waiting_on_you'], query: 'CX-10' });
+
+    expect(api.calls.at(-1)?.search).toBe('?q=CX-10&status=open&status=waiting_on_you');
+  });
+
+  it('opens a ticket as JSON with the API field names', async () => {
+    const { call, api } = await connect({
+      [`POST ${S}/tickets`]: () => ({ status: 201, json: { id: TICKET, reference: 'CX-1001', status: 'open' } }),
+    });
+    const result = await call('create_support_ticket', {
+      subject: 'Calls fail',
+      category: 'campaigns',
+      description: 'Every call to +94 numbers fails.',
+    });
+
+    expect(result.json).toMatchObject({ reference: 'CX-1001' });
+    expect(api.calls.at(-1)?.body).toEqual({
+      subject: 'Calls fail',
+      category: 'campaigns',
+      description: 'Every call to +94 numbers fails.',
+    });
+  });
+
+  it('replies, resolves and fetches an attachment', async () => {
+    const ATTACHMENT = '99999999-9999-4999-8999-999999999999';
+    const { call, api } = await connect({
+      [`POST ${S}/tickets/:id/messages`]: () => ({ status: 201, json: { id: TICKET } }),
+      [`PATCH ${S}/tickets/:id/status`]: () => ({ json: { id: TICKET, status: 'resolved' } }),
+      [`GET ${S}/tickets/:id/attachments/:attachmentId`]: () => ({ json: { url: 'https://x', expiresAt: 'soon' } }),
+    });
+
+    await call('reply_to_support_ticket', { ticket_id: TICKET, body: 'Any news?' });
+    await call('set_support_ticket_status', { ticket_id: TICKET, status: 'resolved' });
+    await call('get_support_attachment_url', { ticket_id: TICKET, attachment_id: ATTACHMENT });
+
+    expect(api.sequence()).toEqual([
+      `POST /support/tickets/${TICKET}/messages`,
+      `PATCH /support/tickets/${TICKET}/status`,
+      `GET /support/tickets/${TICKET}/attachments/${ATTACHMENT}`,
+    ]);
+    expect(api.calls[2]?.body).toEqual({ status: 'resolved' });
+  });
+
+  it('refuses statuses only CXCaller staff can set', async () => {
+    const { call, api } = await connect({});
+    const result = await call('set_support_ticket_status', { ticket_id: TICKET, status: 'in_progress' });
+
+    expect(result.isError).toBe(true);
+    expect(api.sequence()).toEqual([]);
+  });
+
+  it('sends to the live chat and polls only newer messages', async () => {
+    const after = '2026-09-26T10:00:00.000Z';
+    const { call, api } = await connect({
+      [`POST ${S}/chat/messages`]: () => ({ status: 201, json: [{ author: 'user' }, { author: 'automated' }] }),
+      [`GET ${S}/chat/messages`]: () => ({ json: [] }),
+    });
+
+    const sent = await call('send_support_chat_message', { body: 'Hi, calls are failing' });
+    await call('get_support_chat', { after });
+
+    expect(sent.json).toHaveLength(2);
+    expect(api.calls[1]?.body).toEqual({ body: 'Hi, calls are failing' });
+    expect(api.calls.at(-1)?.query).toEqual({ after });
+  });
+
+  it('is its own toolset, and read-only mode keeps only the reads', async () => {
+    const readOnly = await connect({}, { CXCALLER_MCP_READ_ONLY: 'true' });
+
+    expect(readOnly.tools).toEqual(expect.arrayContaining(['list_support_tickets', 'get_support_ticket', 'get_support_chat']));
+    expect(readOnly.tools).not.toContain('create_support_ticket');
+    expect(readOnly.tools).not.toContain('send_support_chat_message');
+
+    const onlySupport = await connect({}, { CXCALLER_MCP_TOOLSETS: 'support' });
+
+    expect(onlySupport.tools).toContain('create_support_ticket');
+    expect(onlySupport.tools).not.toContain('list_campaigns');
   });
 });

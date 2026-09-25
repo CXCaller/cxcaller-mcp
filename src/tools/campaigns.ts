@@ -566,6 +566,27 @@ export function campaignTools(ctx: ToolContext): AnyToolSpec[] {
     }),
 
     defineTool({
+      name: 'duplicate_campaign',
+      title: 'Duplicate campaign',
+      toolset: 'campaigns',
+      mutating: true,
+      description:
+        'Copies any campaign (even a finished one) into a new DRAFT with the same agent, schedule, pacing and caller ID. Nothing is dialed. ' +
+        'Recipients are copied fresh (queued, no attempts) unless include_recipients is false. The start time is not copied: the copy starts when launched. ' +
+        'The copy needs its own content review before launch (verify_campaign / launch_campaign). Use it to call the same people again after a campaign finished.',
+      inputSchema: {
+        ...idShape,
+        name: z.string().min(1).max(255).optional().describe('Default: the source name with " (copy)".'),
+        include_recipients: z.boolean().optional().describe('Default true.'),
+      },
+      handler: ({ campaign_id, name, include_recipients }) =>
+        client.orgPost(
+          `/campaigns/${campaign_id}/duplicate`,
+          compact({ name, includeRecipients: include_recipients }),
+        ),
+    }),
+
+    defineTool({
       name: 'add_campaign_recipients',
       title: 'Add campaign recipients',
       toolset: 'campaigns',
@@ -606,6 +627,74 @@ export function campaignTools(ctx: ToolContext): AnyToolSpec[] {
       },
       handler: ({ campaign_id, page, take, query, group, status }) =>
         client.orgGet(`/campaigns/${campaign_id}/recipients`, { page, take, q: query, group, status }),
+    }),
+
+    defineTool({
+      name: 'get_campaign_recipient',
+      title: 'Get campaign recipient',
+      toolset: 'campaigns',
+      mutating: false,
+      description:
+        'One person on a campaign in full: status, variables, prompt override, and every call made to them. Use the recipient id from list_campaign_recipients.',
+      inputSchema: { ...idShape, recipient_id: uuidSchema },
+      handler: ({ campaign_id, recipient_id }) => client.orgGet(`/campaigns/${campaign_id}/recipients/${recipient_id}`),
+    }),
+
+    defineTool({
+      name: 'update_campaign_recipients',
+      title: 'Update campaign recipients',
+      toolset: 'campaigns',
+      mutating: true,
+      idempotent: true,
+      description:
+        'Edits what the agent knows about specific people on a campaign. `variables` are merged into each recipient\'s existing ones (keys not sent are kept). ' +
+        '`context_override` replaces the whole system prompt for that one person (null removes it). ' +
+        'Changing a context_override is reviewed content: it needs a draft or scheduled campaign, voids the content verification, and takes a scheduled campaign back to draft, so it must be verified and launched again. Variables alone can be changed at any time.',
+      inputSchema: {
+        ...idShape,
+        updates: z
+          .array(
+            z.object({
+              recipient_id: uuidSchema.describe('From list_campaign_recipients.'),
+              variables: z.record(z.string(), z.unknown()).optional(),
+              context_override: z.string().nullable().optional(),
+            }),
+          )
+          .min(1)
+          .max(recipientLimit),
+      },
+      handler: ({ campaign_id, updates }) =>
+        client.orgPatch(`/campaigns/${campaign_id}/recipients`, {
+          updates: updates.map((update) =>
+            compact({
+              campaignContactId: update.recipient_id,
+              variables: update.variables,
+              contextOverride: update.context_override,
+            }),
+          ),
+        }),
+    }),
+
+    defineTool({
+      name: 'remove_campaign_recipients',
+      title: 'Remove campaign recipients',
+      toolset: 'campaigns',
+      mutating: true,
+      destructive: true,
+      description:
+        'Takes people off a campaign before they are called. Only recipients still queued or scheduled are removed; anyone already dialed is silently left in place, so check list_campaign_recipients afterwards. The contacts themselves are kept.',
+      inputSchema: {
+        ...idShape,
+        recipient_ids: z.array(uuidSchema).min(1).max(recipientLimit).describe('From list_campaign_recipients.'),
+      },
+      handler: async ({ campaign_id, recipient_ids }) => {
+        await client.orgPost(`/campaigns/${campaign_id}/recipients/bulk-remove`, { campaignContactIds: recipient_ids });
+
+        return {
+          requested: recipient_ids.length,
+          note: 'Removed those that were still queued or scheduled; any already dialed were kept. list_campaign_recipients shows who remains.',
+        };
+      },
     }),
 
     defineTool({
@@ -701,13 +790,26 @@ export function campaignTools(ctx: ToolContext): AnyToolSpec[] {
       toolset: 'campaigns',
       mutating: true,
       destructive: true,
-      description: 'Permanently deletes a draft or cancelled campaign. Campaigns that ran cannot be deleted.',
+      description:
+        'Deletes a draft, cancelled, completed or failed campaign: it disappears from lists, while its call history is kept. A scheduled, running or paused campaign must be cancelled first (control_campaign).',
       inputSchema: idShape,
       handler: async ({ campaign_id }) => {
         await client.orgDelete(`/campaigns/${campaign_id}`);
 
         return { deleted: campaign_id };
       },
+    }),
+
+    defineTool({
+      name: 'delete_campaigns',
+      title: 'Delete campaigns',
+      toolset: 'campaigns',
+      mutating: true,
+      destructive: true,
+      description:
+        'Deletes up to 100 campaigns at once, like delete_campaign. Scheduled, running or paused ones are skipped rather than failing the batch: `skipped` lists each with its reason (not_deletable: cancel it first; not_found).',
+      inputSchema: { campaign_ids: z.array(uuidSchema).min(1).max(100) },
+      handler: ({ campaign_ids }) => client.orgPost('/campaigns/bulk-delete', { campaignIds: campaign_ids }),
     }),
 
     defineTool({
@@ -719,6 +821,16 @@ export function campaignTools(ctx: ToolContext): AnyToolSpec[] {
         'Live progress of a campaign: recipients (queued/completed/failed), calls made, connect rate, minutes, cost, and a breakdown of how calls ended. Refreshes every ~5 s while running; poll no faster than every 5 s, and stop once status is completed.',
       inputSchema: idShape,
       handler: ({ campaign_id }) => client.orgGet(`/campaigns/${campaign_id}/stats`),
+    }),
+
+    defineTool({
+      name: 'get_live_calls',
+      title: 'Get live calls',
+      toolset: 'campaigns',
+      mutating: false,
+      description: 'Who a campaign is on the phone with right now: the calls currently dialing or in progress. Empty when nothing is in flight.',
+      inputSchema: idShape,
+      handler: ({ campaign_id }) => client.orgGet(`/campaigns/${campaign_id}/currently-calling`),
     }),
 
     defineTool({
