@@ -298,14 +298,87 @@ interface Page {
   meta?: { itemCount?: number };
 }
 
+// ---- Verification ---------------------------------------------------------------
+
 /**
- * The guardrail that matters: checked at the moment of launch against the real
- * recipient count, so it holds however the recipients got there (a large group,
- * repeated add_campaign_recipients calls, …).
+ * The platform only launches a campaign whose content (system prompt, objective and
+ * recipient prompt overrides) its review has `approved`. `POST /verify` submits it;
+ * an AI reviewer answers on a ~15 s poll, and one it will not pass is `flagged` for
+ * a CXCaller admin, who approves or `rejected`s it. Editing that content drops the
+ * campaign back to `unverified`.
+ */
+export interface CampaignReview {
+  id: string;
+  status: string;
+  /** Absent on an API that predates verification; such a campaign launches as before. */
+  reviewStatus?: string;
+  reviewReason?: string | null;
+  reviewedAt?: string | null;
+}
+
+const VERIFY_POLL_INTERVAL_MS = 3000;
+
+/** What the agent should do next, for each review status. */
+export const REVIEW_NOTES: Record<string, string> = {
+  unverified: 'Not submitted for review yet. Run verify_campaign (launch_campaign also does it).',
+  pending: 'The platform\'s content review has not answered yet (usually under a minute). Call verify_campaign or launch_campaign again shortly; it continues the same review.',
+  approved: 'Approved by the platform\'s content review; the campaign can launch.',
+  flagged:
+    'Held for a CXCaller admin: the platform\'s content review would not pass it automatically. It cannot launch until an admin approves it, so tell the user. Check back with get_campaign (reviewStatus), or change the instructions/objective, which submits the new content for review.',
+  rejected:
+    'Rejected by a CXCaller admin. The same content cannot launch; change the instructions or objective with update_campaign, then verify or launch again.',
+};
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * Submits `campaign` for verification unless it is already approved, then waits up
+ * to `seconds` for the verdict. Resubmitting unchanged content is a no-op on the
+ * API, so a retry continues the review in flight rather than starting another.
+ */
+export async function awaitVerification(
+  client: CxCallerClient,
+  campaign: CampaignReview,
+  seconds: number,
+): Promise<CampaignReview> {
+  if (campaign.reviewStatus === undefined || campaign.reviewStatus === 'approved') {
+    return campaign;
+  }
+
+  const deadline = Date.now() + seconds * 1000;
+  let current = await client.orgPost<CampaignReview>(`/campaigns/${campaign.id}/verify`);
+
+  while (current.reviewStatus === 'pending' && Date.now() < deadline) {
+    await sleep(Math.min(VERIFY_POLL_INTERVAL_MS, deadline - Date.now()));
+    current = await client.orgGet<CampaignReview>(`/campaigns/${campaign.id}`);
+  }
+
+  return current;
+}
+
+function reviewBlocker(campaign: CampaignReview): ToolError {
+  const reason = campaign.reviewReason ? ` Reviewer's reason: "${campaign.reviewReason}".` : '';
+  const note = REVIEW_NOTES[campaign.reviewStatus ?? ''] ?? '';
+
+  return new ToolError(
+    `Not launched: content verification is "${campaign.reviewStatus}", and the platform only launches approved campaigns. Nothing was dialed.${reason} ${note}`,
+  );
+}
+
+/**
+ * Everything that stands between a draft and a dialing campaign, checked at the
+ * moment of launch:
+ *
+ * - the recipient cap, against the real count, so it holds however the recipients
+ *   got there (a large group, repeated add_campaign_recipients calls, …);
+ * - content verification, which is submitted and awaited for up to `verifySeconds`.
  */
 export async function launchWithGuard(
   { client, config }: ToolContext,
   campaignId: string,
+  verifySeconds = config.maxWaitSeconds,
 ): Promise<unknown> {
   const page = await client.orgGet<Page>(`/campaigns/${campaignId}/recipients`, { take: 1 });
   const count = page.meta?.itemCount ?? 0;
@@ -314,6 +387,17 @@ export async function launchWithGuard(
     throw new ToolError(
       `Refusing to launch: the campaign has ${count} recipients, above this server's limit of ${config.maxRecipients} (CXCALLER_MCP_MAX_RECIPIENTS). Nothing was dialed. Remove recipients with a smaller audience, or ask the operator to raise the limit.`,
     );
+  }
+
+  const campaign = await client.orgGet<CampaignReview>(`/campaigns/${campaignId}`);
+
+  // Only a draft launches; anything else is left to the API's own 409.
+  if (campaign.status === 'draft') {
+    const reviewed = await awaitVerification(client, campaign, verifySeconds);
+
+    if (reviewed.reviewStatus !== undefined && reviewed.reviewStatus !== 'approved') {
+      throw reviewBlocker(reviewed);
+    }
   }
 
   return client.orgPost(`/campaigns/${campaignId}/launch`);
@@ -382,7 +466,8 @@ export function campaignTools(ctx: ToolContext): AnyToolSpec[] {
       toolset: 'campaigns',
       mutating: false,
       description:
-        'Full configuration of one campaign (agent, schedule, caller ID, status, stats) plus its declared outcome fields. Status is one of draft, scheduled, running, paused, completed, cancelled, failed.',
+        'Full configuration of one campaign (agent, schedule, caller ID, status, stats) plus its declared outcome fields. Status is one of draft, scheduled, running, paused, completed, cancelled, failed. ' +
+        'reviewStatus is the content verification a launch needs: unverified, pending, approved, flagged (held for a CXCaller admin) or rejected, with reviewReason.',
       inputSchema: idShape,
       handler: async ({ campaign_id }) => {
         const [campaign, outcomeFields] = await Promise.all([
@@ -403,6 +488,7 @@ export function campaignTools(ctx: ToolContext): AnyToolSpec[] {
       description:
         'Creates a calling campaign in one step: the agent (instructions, language, voice), schedule and pacing, caller ID, the structured data to extract (outcome_fields), and who to call. ' +
         'By default it is created as a DRAFT and nothing is dialed; review it, then run launch_campaign. Pass launch=true to dispatch immediately. ' +
+        'Launching first needs the platform\'s content review to approve the instructions; run verify_campaign on the draft to learn the verdict before asking the user to confirm. ' +
         'A launched campaign starts calling within about 20 seconds, so only launch when the user has asked you to place these calls. ' +
         'Recipients come from `recipients` (phone numbers; contacts are created if new), `group_ids` and/or `contact_ids`. ' +
         'Defaults: each recipient is called once (max_attempts 1) and only one call is in flight at a time (max_concurrent_calls 1), so raise max_concurrent_calls for anything larger than a handful of people.',
@@ -456,7 +542,8 @@ export function campaignTools(ctx: ToolContext): AnyToolSpec[] {
       mutating: true,
       idempotent: true,
       description:
-        'Edits a campaign. Only draft or scheduled campaigns are editable; a running, paused or finished one is rejected (cancel then reactivate to edit). Send only what should change; omitted fields are untouched and null clears a nullable field. caller_id and outcome_fields replace their current values.',
+        'Edits a campaign. Only draft or scheduled campaigns are editable; a running, paused or finished one is rejected (cancel then reactivate to edit). Send only what should change; omitted fields are untouched and null clears a nullable field. caller_id and outcome_fields replace their current values. ' +
+        'Actually changing instructions or objective voids the content verification (reviewStatus back to unverified) and takes a SCHEDULED campaign back to draft, so it must be launched again.',
       inputSchema: {
         ...idShape,
         name: z.string().min(1).max(255).optional(),
@@ -563,9 +650,37 @@ export function campaignTools(ctx: ToolContext): AnyToolSpec[] {
       reachesPeople: true,
       description:
         'DISPATCHES a draft campaign: it will start placing real phone calls to every recipient within about 20 seconds (or at its scheduled start). Only call this when the user has asked you to start these calls. ' +
-        'The campaign must be complete (recipients, caller ID, and instructions); if not, the error lists what is missing. Use control_campaign to pause or cancel afterwards.',
+        'The campaign must be complete (recipients, caller ID, and instructions); if not, the error lists what is missing. ' +
+        `Its content must also pass the platform's review: this submits it if needed and waits up to ${config.maxWaitSeconds} s for the verdict. If the review flags or rejects it, or has not answered in time, nothing is dialed and the error says what to do. ` +
+        'Use control_campaign to pause or cancel afterwards.',
       inputSchema: idShape,
       handler: ({ campaign_id }) => launchWithGuard(ctx, campaign_id),
+    }),
+
+    defineTool({
+      name: 'verify_campaign',
+      title: 'Verify campaign content',
+      toolset: 'campaigns',
+      mutating: true,
+      idempotent: true,
+      description:
+        'Submits a draft or scheduled campaign\'s content (instructions, objective, per-recipient prompt overrides) to the platform\'s review, which must approve it before the campaign can launch, and waits up to ' +
+        `${config.maxWaitSeconds} s for the verdict. Nothing is dialed. launch_campaign does this itself; call this first to tell the user the verdict before they confirm a launch. ` +
+        'reviewStatus: approved (can launch), pending (still being reviewed; call again), flagged (held for a CXCaller admin; cannot launch until approved), rejected (change the content, then verify again).',
+      inputSchema: idShape,
+      handler: async ({ campaign_id }) => {
+        const campaign = await client.orgGet<CampaignReview>(`/campaigns/${campaign_id}`);
+        const reviewed = await awaitVerification(client, campaign, config.maxWaitSeconds);
+
+        return {
+          campaign_id,
+          status: reviewed.status,
+          reviewStatus: reviewed.reviewStatus,
+          reviewReason: reviewed.reviewReason,
+          reviewedAt: reviewed.reviewedAt,
+          note: REVIEW_NOTES[reviewed.reviewStatus ?? ''] ?? 'This platform does not verify campaign content; launch as usual.',
+        };
+      },
     }),
 
     defineTool({

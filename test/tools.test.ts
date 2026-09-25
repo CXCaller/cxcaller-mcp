@@ -4,8 +4,29 @@ import { CAMPAIGN_ID, connect, ORG_ID, type Handler } from './helpers.js';
 
 const C = `/organizations/${ORG_ID}/campaigns`;
 
-/** The happy-path campaign API: every write echoes success. */
-function campaignRoutes(overrides: Record<string, Handler> = {}): Record<string, Handler> {
+interface CampaignFake {
+  /** The content review's answers: to the verify, then to each read while still pending. */
+  verdicts?: string[];
+  /** What the campaign reads as once launched. */
+  launchedStatus?: string;
+}
+
+/**
+ * The happy-path campaign API: every write echoes success. The campaign is an
+ * unverified draft until verified, and the review approves it unless told otherwise.
+ */
+function campaignRoutes(
+  overrides: Record<string, Handler> = {},
+  { verdicts = ['approved'], launchedStatus = 'scheduled' }: CampaignFake = {},
+): Record<string, Handler> {
+  const campaign = { id: CAMPAIGN_ID, name: 'x', status: 'draft', reviewStatus: 'unverified', objectiveConfig: {} };
+  let answered = 0;
+  const review = () => {
+    campaign.reviewStatus = verdicts[Math.min(answered++, verdicts.length - 1)] as string;
+
+    return { json: { ...campaign } };
+  };
+
   return {
     [`POST ${C}`]: () => ({ status: 201, json: { id: CAMPAIGN_ID, name: 'x', status: 'draft' } }),
     [`PATCH ${C}/${CAMPAIGN_ID}`]: () => ({ json: { id: CAMPAIGN_ID } }),
@@ -14,8 +35,13 @@ function campaignRoutes(overrides: Record<string, Handler> = {}): Record<string,
     [`POST ${C}/${CAMPAIGN_ID}/contacts/import`]: () => ({ json: { imported: 2, created: 2, reused: 0, total: 2 } }),
     [`POST ${C}/${CAMPAIGN_ID}/recipients`]: () => ({ json: { added: 5, total: 5 } }),
     [`GET ${C}/${CAMPAIGN_ID}/recipients`]: () => ({ json: { data: [], meta: { itemCount: 2 } } }),
-    [`POST ${C}/${CAMPAIGN_ID}/launch`]: () => ({ json: { id: CAMPAIGN_ID, status: 'scheduled' } }),
-    [`GET ${C}/${CAMPAIGN_ID}`]: () => ({ json: { id: CAMPAIGN_ID, name: 'x', status: 'draft', objectiveConfig: {} } }),
+    [`POST ${C}/${CAMPAIGN_ID}/verify`]: review,
+    [`POST ${C}/${CAMPAIGN_ID}/launch`]: () => {
+      campaign.status = launchedStatus;
+
+      return { json: { ...campaign } };
+    },
+    [`GET ${C}/${CAMPAIGN_ID}`]: () => (campaign.reviewStatus === 'pending' ? review() : { json: { ...campaign } }),
     ...overrides,
   };
 }
@@ -176,7 +202,12 @@ describe('launch_campaign guardrail', () => {
     const result = await call('launch_campaign', { campaign_id: CAMPAIGN_ID });
 
     expect(result.isError).toBe(false);
-    expect(api.sequence()).toEqual([`GET /campaigns/${CAMPAIGN_ID}/recipients`, `POST /campaigns/${CAMPAIGN_ID}/launch`]);
+    expect(api.sequence()).toEqual([
+      `GET /campaigns/${CAMPAIGN_ID}/recipients`,
+      `GET /campaigns/${CAMPAIGN_ID}`,
+      `POST /campaigns/${CAMPAIGN_ID}/verify`,
+      `POST /campaigns/${CAMPAIGN_ID}/launch`,
+    ]);
     expect(api.calls.find((c) => c.path.endsWith('/recipients'))?.query).toEqual({ take: '1' });
   });
 
@@ -206,6 +237,144 @@ describe('launch_campaign guardrail', () => {
 
     expect(result.isError).toBe(true);
     expect(result.text).toMatch(/missing: caller_id, agent/);
+  });
+});
+
+describe('launch_campaign verification', () => {
+  const launched = (sequence: string[]) => sequence.some((entry) => entry.endsWith('/launch'));
+
+  it('launches an already-approved campaign without resubmitting it', async () => {
+    const { call, api } = await connect(
+      campaignRoutes({
+        [`GET ${C}/${CAMPAIGN_ID}`]: () => ({ json: { id: CAMPAIGN_ID, status: 'draft', reviewStatus: 'approved' } }),
+      }),
+    );
+    const result = await call('launch_campaign', { campaign_id: CAMPAIGN_ID });
+
+    expect(result.isError).toBe(false);
+    expect(api.sequence()).not.toContain(`POST /campaigns/${CAMPAIGN_ID}/verify`);
+    expect(launched(api.sequence())).toBe(true);
+  });
+
+  it('waits out a pending review, then launches', async () => {
+    const { call, api } = await connect(campaignRoutes({}, { verdicts: ['pending', 'approved'] }), {
+      CXCALLER_MCP_MAX_WAIT_SECONDS: '1',
+    });
+    const result = await call('launch_campaign', { campaign_id: CAMPAIGN_ID });
+
+    expect(result.isError, result.text).toBe(false);
+    expect(api.sequence().slice(1)).toEqual([
+      `GET /campaigns/${CAMPAIGN_ID}`,
+      `POST /campaigns/${CAMPAIGN_ID}/verify`,
+      `GET /campaigns/${CAMPAIGN_ID}`,
+      `POST /campaigns/${CAMPAIGN_ID}/launch`,
+    ]);
+  });
+
+  it('does not dial a campaign the review flagged, and passes on the reason', async () => {
+    const { call, api } = await connect(
+      campaignRoutes({
+        [`POST ${C}/${CAMPAIGN_ID}/verify`]: () => ({
+          json: { id: CAMPAIGN_ID, status: 'draft', reviewStatus: 'flagged', reviewReason: 'Asks for card numbers' },
+        }),
+      }),
+    );
+    const result = await call('launch_campaign', { campaign_id: CAMPAIGN_ID });
+
+    expect(result.isError).toBe(true);
+    expect(result.text).toMatch(/"flagged"/);
+    expect(result.text).toMatch(/Nothing was dialed/);
+    expect(result.text).toContain('Asks for card numbers');
+    expect(result.text).toMatch(/admin/);
+    expect(launched(api.sequence())).toBe(false);
+  });
+
+  it('does not dial rejected content, and says to change it', async () => {
+    const { call, api } = await connect(campaignRoutes({}, { verdicts: ['rejected'] }));
+    const result = await call('launch_campaign', { campaign_id: CAMPAIGN_ID });
+
+    expect(result.isError).toBe(true);
+    expect(result.text).toMatch(/update_campaign/);
+    expect(launched(api.sequence())).toBe(false);
+  });
+
+  it('gives up without dialing when the review does not answer in time', async () => {
+    const { call, api } = await connect(campaignRoutes({}, { verdicts: ['pending'] }), {
+      CXCALLER_MCP_MAX_WAIT_SECONDS: '1',
+    });
+    const result = await call('launch_campaign', { campaign_id: CAMPAIGN_ID });
+
+    expect(result.isError).toBe(true);
+    expect(result.text).toMatch(/"pending"/);
+    expect(result.text).toMatch(/launch_campaign again/);
+    expect(launched(api.sequence())).toBe(false);
+  });
+
+  it('leaves a campaign that is not a draft to the API, without submitting it', async () => {
+    const { call, api } = await connect(
+      campaignRoutes({
+        [`GET ${C}/${CAMPAIGN_ID}`]: () => ({ json: { id: CAMPAIGN_ID, status: 'running', reviewStatus: 'approved' } }),
+        [`POST ${C}/${CAMPAIGN_ID}/launch`]: () => ({ status: 409, json: { message: 'error.campaign_not_launchable' } }),
+      }),
+    );
+    const result = await call('launch_campaign', { campaign_id: CAMPAIGN_ID });
+
+    expect(result.isError).toBe(true);
+    expect(result.text).toMatch(/Only a draft campaign can be launched/);
+    expect(api.sequence()).not.toContain(`POST /campaigns/${CAMPAIGN_ID}/verify`);
+  });
+
+  it('launches as before on an API without verification', async () => {
+    const { call, api } = await connect(
+      campaignRoutes({ [`GET ${C}/${CAMPAIGN_ID}`]: () => ({ json: { id: CAMPAIGN_ID, status: 'draft' } }) }),
+    );
+    const result = await call('launch_campaign', { campaign_id: CAMPAIGN_ID });
+
+    expect(result.isError).toBe(false);
+    expect(api.sequence()).not.toContain(`POST /campaigns/${CAMPAIGN_ID}/verify`);
+  });
+
+  it('create_campaign with launch=true names the surviving draft when the review flags it', async () => {
+    const { call, api } = await connect(campaignRoutes({}, { verdicts: ['flagged'] }));
+    const result = await call('create_campaign', { name: 'x', instructions: 'Hi', launch: true });
+
+    expect(result.isError).toBe(true);
+    expect(result.text).toContain('Failed at "launch"');
+    expect(result.text).toContain(CAMPAIGN_ID);
+    expect(launched(api.sequence())).toBe(false);
+  });
+});
+
+describe('verify_campaign', () => {
+  it('submits the draft and reports the verdict with what to do next', async () => {
+    const { call, api } = await connect(campaignRoutes({}, { verdicts: ['flagged'] }));
+    const result = await call('verify_campaign', { campaign_id: CAMPAIGN_ID });
+
+    expect(result.isError).toBe(false);
+    expect(api.sequence()).toEqual([`GET /campaigns/${CAMPAIGN_ID}`, `POST /campaigns/${CAMPAIGN_ID}/verify`]);
+    expect(result.json).toMatchObject({ campaign_id: CAMPAIGN_ID, status: 'draft', reviewStatus: 'flagged' });
+    expect((result.json as { note: string }).note).toMatch(/admin/);
+  });
+
+  it('does not resubmit an approved campaign', async () => {
+    const { call, api } = await connect(
+      campaignRoutes({
+        [`GET ${C}/${CAMPAIGN_ID}`]: () => ({ json: { id: CAMPAIGN_ID, status: 'draft', reviewStatus: 'approved' } }),
+      }),
+    );
+    const result = await call('verify_campaign', { campaign_id: CAMPAIGN_ID });
+
+    expect(result.json).toMatchObject({ reviewStatus: 'approved' });
+    expect(api.sequence()).toEqual([`GET /campaigns/${CAMPAIGN_ID}`]);
+  });
+
+  it('is hidden in read-only mode and never reaches people', async () => {
+    expect((await connect({}, { CXCALLER_MCP_READ_ONLY: 'true' })).tools).not.toContain('verify_campaign');
+
+    const { mcp } = await connect({});
+    const annotations = (await mcp.listTools()).tools.find((tool) => tool.name === 'verify_campaign')?.annotations;
+
+    expect(annotations).toMatchObject({ readOnlyHint: false, openWorldHint: false, destructiveHint: false });
   });
 });
 
@@ -245,13 +414,14 @@ describe('update_campaign', () => {
 });
 
 describe('make_call', () => {
-  const finishedCampaign = { id: CAMPAIGN_ID, name: 'Call', status: 'completed', stats: { totalAttempts: 1 } };
-  const callRoutes = (status = 'scheduled', attempts: unknown[] = []) =>
-    campaignRoutes({
-      [`GET ${C}/${CAMPAIGN_ID}`]: () => ({ json: { ...finishedCampaign, status } }),
-      [`GET ${C}/${CAMPAIGN_ID}/recipients`]: () => ({ json: { data: [{ id: 'r1', status: 'queued' }], meta: { itemCount: 1 } } }),
-      [`GET ${C}/${CAMPAIGN_ID}/attempts`]: () => ({ json: { data: attempts, meta: {} } }),
-    });
+  const callRoutes = (status = 'scheduled', attempts: unknown[] = [], verdicts?: string[]) =>
+    campaignRoutes(
+      {
+        [`GET ${C}/${CAMPAIGN_ID}/recipients`]: () => ({ json: { data: [{ id: 'r1', status: 'queued' }], meta: { itemCount: 1 } } }),
+        [`GET ${C}/${CAMPAIGN_ID}/attempts`]: () => ({ json: { data: attempts, meta: {} } }),
+      },
+      { launchedStatus: status, verdicts },
+    );
 
   it('creates and launches a single-recipient campaign, called once, one at a time', async () => {
     const { call, api } = await connect(callRoutes());
@@ -264,11 +434,13 @@ describe('make_call', () => {
     });
 
     expect(result.isError).toBe(false);
-    expect(api.sequence().slice(0, 6)).toEqual([
+    expect(api.sequence().slice(0, 8)).toEqual([
       'POST /campaigns',
       `PATCH /campaigns/${CAMPAIGN_ID}`,
       `POST /campaigns/${CAMPAIGN_ID}/contacts/import`,
       `GET /campaigns/${CAMPAIGN_ID}/recipients`,
+      `GET /campaigns/${CAMPAIGN_ID}`,
+      `POST /campaigns/${CAMPAIGN_ID}/verify`,
       `POST /campaigns/${CAMPAIGN_ID}/launch`,
       `GET /campaigns/${CAMPAIGN_ID}`,
     ]);
@@ -318,6 +490,30 @@ describe('make_call', () => {
     expect(result.text).toContain('attach the person to call');
     expect(result.text).toContain(CAMPAIGN_ID);
     expect(api.sequence().some((entry) => entry.endsWith('/launch'))).toBe(false);
+  });
+
+  it('does not dial when the review flags the instructions, and names the surviving draft', async () => {
+    const { call, api } = await connect(callRoutes('scheduled', [], ['flagged']));
+    const result = await call('make_call', { to: '+94771234567', instructions: 'Hi' });
+
+    expect(result.isError).toBe(true);
+    expect(result.text).toContain('Failed at "dispatch"');
+    expect(result.text).toContain(CAMPAIGN_ID);
+    expect(api.sequence().some((entry) => entry.endsWith('/launch'))).toBe(false);
+  });
+
+  it('counts the wait for the review against the same ceiling as wait_seconds', async () => {
+    const { call, api } = await connect(callRoutes('scheduled', [], ['pending', 'approved']), {
+      CXCALLER_MCP_MAX_WAIT_SECONDS: '1',
+    });
+    const result = await call('make_call', { to: '+94771234567', instructions: 'Hi', wait_seconds: 1 });
+
+    expect(result.isError, result.text).toBe(false);
+
+    // The review used the whole budget, so the only read after launch is the result itself.
+    const afterLaunch = api.sequence().slice(api.sequence().indexOf(`POST /campaigns/${CAMPAIGN_ID}/launch`) + 1);
+
+    expect(afterLaunch.filter((entry) => entry === `GET /campaigns/${CAMPAIGN_ID}`)).toHaveLength(1);
   });
 
   const CONTACT_ID = '66666666-6666-4666-8666-666666666666';

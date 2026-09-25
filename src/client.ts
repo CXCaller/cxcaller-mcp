@@ -34,7 +34,7 @@ export interface ClientOptions {
  */
 const HINTS: Record<string, string> = {
   'error.campaign_incomplete':
-    'The campaign cannot launch yet. Fix everything in `missing` (recipients, caller_id, agent) and retry.',
+    'The campaign cannot launch yet. Fix everything in `missing` (recipients, caller_id, agent) and retry. `verification` means the platform\'s content review has not approved it: run verify_campaign.',
   'error.campaign_not_editable':
     'Only draft or scheduled campaigns can be edited. Cancel then reactivate it to get back to draft.',
   'error.campaign_not_launchable': 'Only a draft campaign can be launched.',

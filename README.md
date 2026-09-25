@@ -97,7 +97,7 @@ Deployed like the other services: GitHub Actions builds the image, pushes it to 
 | Goal | Tools |
 | --- | --- |
 | **Call one person** | `make_call` → `get_call_result` |
-| **Run a campaign** | `create_campaign` (draft, or `launch: true`) → `launch_campaign` → `get_campaign_stats` → `get_campaign_outcomes` |
+| **Run a campaign** | `create_campaign` (draft, or `launch: true`) → `verify_campaign` (optional) → `launch_campaign` → `get_campaign_stats` → `get_campaign_outcomes` |
 | Control a campaign | `control_campaign` (pause / resume / cancel / reactivate), `update_campaign`, `add_campaign_recipients`, `list_campaign_recipients`, `retry_campaign_recipient`, `delete_campaign` |
 | Inspect calls | `list_campaign_calls`, `get_call` (transcript), `get_call_recording_url` |
 | Contacts | `list_contacts`, `get_contact`, `create_contact`, `create_contacts_bulk`, `update_contact`, `delete_contacts`, `list_contact_groups`, `create_contact_group`, `add_contacts_to_group` |
@@ -108,8 +108,9 @@ Deployed like the other services: GitHub Actions builds the image, pushes it to 
 
 The platform dials through campaigns, and has no single-call endpoint. `make_call` creates a one-recipient campaign (`max_attempts: 1`, one call at a time), launches it, and returns its `campaign_id`. So:
 
+- the platform's content review must approve the instructions first; `make_call` waits for it (usually under a minute), and dials nothing if the review flags or rejects them;
 - dialing begins within **~20 s** (the dispatcher's tick), and a call takes roughly 30 s to a few minutes;
-- poll `get_call_result` until `finished` is true, or pass `wait_seconds` (max 80) to wait inside the call;
+- poll `get_call_result` until `finished` is true, or pass `wait_seconds` to wait inside the call (the review and the wait share one 80 s ceiling);
 - each call shows up in the dashboard as a campaign named `Call to <name> · <time>`.
 
 To get structured answers back (e.g. "agreed to a callback?"), declare `outcome_fields` **before** the call runs.
@@ -120,6 +121,7 @@ Calls reach real people, so the server is conservative by default:
 
 - **`create_campaign` makes a draft.** Nothing dials until `launch_campaign`, or `launch: true`.
 - **Launch cap.** `launch_campaign` (and `launch: true`) checks the campaign's *actual* recipient count and refuses above `CXCALLER_MCP_MAX_RECIPIENTS` (default 1000), however the recipients got there.
+- **Content review.** The platform launches only campaigns whose instructions its review has approved. Launching submits the campaign and waits for the verdict; a campaign the review flags waits for a CXCaller admin, and nothing is dialed until one approves it.
 - **Read-only mode.** `CXCALLER_MCP_READ_ONLY=true` removes every tool that places calls or changes data; agents cannot even see them.
 - **Toolsets.** `CXCALLER_MCP_TOOLSETS=calls,campaigns` exposes only what an agent needs.
 - **Tool annotations.** Every tool declares read-only / destructive / reaches-people hints so clients can require approval for the dangerous ones.

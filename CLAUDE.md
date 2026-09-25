@@ -23,6 +23,7 @@ pnpm test:e2e     # needs CXCALLER_E2E_URL/EMAIL/PASSWORD and a running cxcaller
 
 - Auth is an API key (`Authorization: Bearer cxk_…` or `X-API-Key`), bound to one organization; `GET /api-key/whoami` yields the org id every path needs.
 - The API has no single-call endpoint: `make_call` composes create → configure → import → launch on a one-recipient campaign. The dispatcher ticks every 20 s.
+- Launch requires `reviewStatus: approved`. `POST …/verify` submits the content (prompt, objective, recipient `contextOverride`s); an AI reviewer answers in ~15–40 s with `approved` or `flagged` (an admin then approves or `rejected`s). Changing that content resets it to `unverified` and a `scheduled` campaign to `draft`. `launchWithGuard` submits and waits (within `CXCALLER_MCP_MAX_WAIT_SECONDS`), and treats a missing `reviewStatus` as an API that predates verification.
 - Campaign config is only editable in `draft`/`scheduled`. `PATCH` replaces `objectiveConfig` wholesale, so `update_campaign` merges onto the existing value first.
 
 ## Hosted mode (mcp.cxcaller.com)
