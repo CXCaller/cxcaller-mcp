@@ -35,7 +35,9 @@ export interface ClientOptions {
  */
 const HINTS: Record<string, string> = {
   'error.campaign_incomplete':
-    'The campaign cannot launch yet. Fix everything in `missing` (recipients, caller_id, agent) and retry. `verification` means the platform\'s content review has not approved it: run verify_campaign.',
+    'The campaign cannot launch yet. Fix everything in `missing` (recipients, caller_id, agent) and retry. `verification` means the platform\'s content review has not approved it: run verify_campaign. `variables` means a {{placeholder}} in the prompt or objective has no value for some recipients: give those recipients that variable, or take the placeholder out of the prompt. `billing` means the organization has no minutes or credit left.',
+  'error.campaign_variables_missing':
+    'Those recipients would have no value for a {{placeholder}} in the campaign\'s prompt, so their calls would fail. Send the variable with a non-empty value.',
   'error.campaign_not_editable':
     'Only draft or scheduled campaigns can be edited. Cancel then reactivate it to get back to draft.',
   'error.campaign_not_launchable': 'Only a draft campaign can be launched.',
@@ -84,6 +86,13 @@ function describeFailure(status: number, body: unknown): { code?: string; messag
 
   if (Array.isArray(payload.missing)) {
     message += ` (missing: ${payload.missing.map(String).join(', ')})`;
+  }
+
+  if (Array.isArray(payload.missingVariables)) {
+    const gaps = payload.missingVariables.map((gap: { key?: unknown; recipients?: unknown }) =>
+      `${String(gap.key)} for ${String(gap.recipients)} recipient(s)`,
+    );
+    message += ` (no value for: ${gaps.join(', ')})`;
   }
 
   const hint = code ? HINTS[code] : undefined;

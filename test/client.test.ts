@@ -84,6 +84,23 @@ describe('CxCallerClient', () => {
       expect((error as Error).message).toMatch(/Fix everything in `missing`/);
     });
 
+    it('names the placeholders recipients have no value for', async () => {
+      const { client } = build({
+        'POST /x': () => ({
+          status: 422,
+          json: {
+            message: 'error.campaign_incomplete',
+            missing: ['variables'],
+            missingVariables: [{ key: 'arrears_amount', recipients: 4 }],
+          },
+        }),
+      });
+
+      await expect(client.post('/x')).rejects.toThrow(
+        /missing: variables\) \(no value for: arrears_amount for 4 recipient\(s\)\)/,
+      );
+    });
+
     it('reports an unreachable API as a network error naming the host', async () => {
       const client = new CxCallerClient({
         apiKey: KEY,
